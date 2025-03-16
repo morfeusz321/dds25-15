@@ -2,8 +2,11 @@ import logging
 import os
 import atexit
 import uuid
+import json
 
 import redis
+from kafka import KafkaProducer, KafkaConsumer
+from kafka.errors import KafkaError
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
@@ -18,9 +21,19 @@ db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
 
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_SERVERS', 'kafka1:19092').split(',')
+STOCK_TOPIC = 'stock-topic'
+ORDER_TOPIC = 'order-topic'
+
+producer = KafkaProducer(
+    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+    retries=5
+)
 
 def close_db_connection():
     db.close()
+    producer.close()
 
 
 atexit.register(close_db_connection)
@@ -108,6 +121,51 @@ def remove_stock(item_id: str, amount: int):
         return abort(400, DB_ERROR_STR)
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
+
+def process_stock_event(value: dict):
+    """
+    Process stock event, update stock and forward to ORDER_TOPIC
+    """
+    try:
+        app.logger.debug(f"Processing payment event: {value}")
+        
+        # Make sure order_id exists in the value
+        if 'order_id' not in value:
+            app.logger.error(f"Invalid message format: missing order_id")
+            return
+            
+        order_id = value['order_id'] + '1'
+        
+        # Forward the message to ORDER_TOPIC
+        producer.send(
+            ORDER_TOPIC,
+            key=order_id.encode() if isinstance(order_id, str) else str(order_id).encode(),
+            value=value
+        )
+        
+        app.logger.debug(f"Payment processed for order: {order_id}")
+    except Exception as e:
+        app.logger.error(f"Failed to process payment: {str(e)}")
+
+
+def start_stock_consumer():
+    consumer = KafkaConsumer(
+        STOCK_TOPIC,
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        group_id='stock-group',
+        auto_offset_reset='earliest',
+        value_deserializer=lambda m: json.loads(m.decode('utf-8'))
+    )
+
+    for message in consumer:
+        try:
+            process_stock_event(message.value)
+        except Exception as e:
+            app.logger.error(f"Error processing stock event: {e}")
+
+
+import threading
+threading.Thread(target=start_stock_consumer, daemon=True).start()
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

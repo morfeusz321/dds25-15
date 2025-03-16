@@ -4,9 +4,12 @@ import atexit
 import random
 import uuid
 from collections import defaultdict
+import json
 
 import redis
 import requests
+from kafka import KafkaProducer, KafkaConsumer
+from kafka.errors import KafkaError
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
@@ -17,7 +20,9 @@ REQ_ERROR_STR = "Requests error"
 
 GATEWAY_URL = os.environ['GATEWAY_URL']
 
+
 app = Flask("order-service")
+
 
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
@@ -25,8 +30,21 @@ db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               db=int(os.environ['REDIS_DB']))
 
 
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_SERVERS', 'kafka1:19092').split(',')
+STOCK_TOPIC = 'stock-topic'
+PAYMENT_TOPIC = 'payment-topic'
+ORDER_TOPIC = 'order-topic'
+
+producer = KafkaProducer(
+    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+    retries=5
+)
+
+
 def close_db_connection():
     db.close()
+    producer.close()
 
 
 atexit.register(close_db_connection)
@@ -125,6 +143,9 @@ def send_get_request(url: str):
 
 @app.post('/addItem/<order_id>/<item_id>/<quantity>')
 def add_item(order_id: str, item_id: str, quantity: int):
+    """
+    This has to be changed to use the stock service to check if the item exists and if it does, add it to the order.
+    """
     order_entry: OrderValue = get_order_from_db(order_id)
     item_reply = send_get_request(f"{GATEWAY_URL}/stock/find/{item_id}")
     if item_reply.status_code != 200:
@@ -137,6 +158,19 @@ def add_item(order_id: str, item_id: str, quantity: int):
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
+    
+    # Send request to stock service to update stock
+    producer.send(
+        STOCK_TOPIC,
+        key=order_id.encode(),
+        value={
+            'order_id': order_id,
+            'item_id': item_id,
+            'quantity': quantity
+        }
+    )
+
+
     return Response(f"Item: {item_id} added to: {order_id} price updated to: {order_entry.total_cost}",
                     status=200)
 
@@ -148,35 +182,83 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
-    app.logger.debug(f"Checking out {order_id}")
-    order_entry: OrderValue = get_order_from_db(order_id)
-    # get the quantity per item
-    items_quantities: dict[str, int] = defaultdict(int)
-    for item_id, quantity in order_entry.items:
-        items_quantities[item_id] += quantity
-    # The removed items will contain the items that we already have successfully subtracted stock from
-    # for rollback purposes.
-    removed_items: list[tuple[str, int]] = []
-    for item_id, quantity in items_quantities.items():
-        stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
-        if stock_reply.status_code != 200:
-            # If one item does not have enough stock we need to rollback
-            rollback_stock(removed_items)
-            abort(400, f'Out of stock on item_id: {item_id}')
-        removed_items.append((item_id, quantity))
-    user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
-    if user_reply.status_code != 200:
-        # If the user does not have enough credit we need to rollback all the item stock subtractions
-        rollback_stock(removed_items)
-        abort(400, "User out of credit")
-    order_entry.paid = True
-    try:
-        db.set(order_id, msgpack.encode(order_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    app.logger.debug("Checkout successful")
+    # app.logger.debug(f"Checking out {order_id}")
+    # order_entry: OrderValue = get_order_from_db(order_id)
+    # # get the quantity per item
+    # items_quantities: dict[str, int] = defaultdict(int)
+    # for item_id, quantity in order_entry.items:
+    #     items_quantities[item_id] += quantity
+    # # The removed items will contain the items that we already have successfully subtracted stock from
+    # # for rollback purposes.
+    # removed_items: list[tuple[str, int]] = []
+    # for item_id, quantity in items_quantities.items():
+    #     stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
+    #     if stock_reply.status_code != 200:
+    #         # If one item does not have enough stock we need to rollback
+    #         rollback_stock(removed_items)
+    #         abort(400, f'Out of stock on item_id: {item_id}')
+    #     removed_items.append((item_id, quantity))
+    # user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
+    # if user_reply.status_code != 200:
+    #     # If the user does not have enough credit we need to rollback all the item stock subtractions
+    #     rollback_stock(removed_items)
+    #     abort(400, "User out of credit")
+    # order_entry.paid = True
+    # try:
+    #     db.set(order_id, msgpack.encode(order_entry))
+    # except redis.exceptions.RedisError:
+    #     return abort(400, DB_ERROR_STR)
+    # app.logger.debug("Checkout successful")
+    # return Response("Checkout successful", status=200)
+
+    producer.send(
+        PAYMENT_TOPIC,
+        key=order_id.encode(),
+        value={
+            'order_id': order_id
+        }
+
+    )
+
+    producer.send(
+        STOCK_TOPIC,
+        key=order_id.encode(),
+        value={
+            'order_id': order_id
+        }
+    )
+    
+    app.logger.debug(f"Checkout successful for order: {order_id}")
     return Response("Checkout successful", status=200)
 
+
+def process_order_event(value: dict):
+
+    """
+    This function will check if the order is paid and there is enough stock to fulfill the order.
+    If the order is not paid but the stock has been subtracted, it will rollback the stock.
+    and more.
+    """
+    app.logger.debug(f"Processing order event: {value}")
+
+def start_order_consumer():
+    consumer = KafkaConsumer(
+        ORDER_TOPIC,
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+        group_id='order-group',
+        auto_offset_reset='earliest'
+    )
+
+    for message in consumer:
+        try:
+            process_order_event(message.value)
+        except Exception as e:
+            app.logger.error(f"Error processing message: {message.value} - {e}")
+
+
+import threading
+threading.Thread(target=start_order_consumer, daemon=True).start()
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

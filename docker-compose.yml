@@ -17,41 +17,70 @@ services:
     image: order:latest
     environment:
       - GATEWAY_URL=http://gateway:80
+      - KAFKA_SERVERS=kafka1:19092
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env
     depends_on:
-      - order-db
+      kafka1:
+        condition: service_healthy
+      order-db:
+        condition: service_healthy
 
   order-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   stock-service:
     build: ./stock
     image: stock:latest
+    environment:
+      - KAFKA_SERVERS=kafka1:19092
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/stock_redis.env
     depends_on:
-      - stock-db
+      kafka1:
+        condition: service_healthy
+      stock-db:
+        condition: service_healthy
 
   stock-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   payment-service:
     build: ./payment
     image: user:latest
+    environment:
+      - KAFKA_SERVERS=kafka1:19092
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/payment_redis.env
     depends_on:
-      - payment-db
+      kafka1:
+        condition: service_healthy
+      payment-db:
+        condition: service_healthy
 
   payment-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   zoo1:
     image: confluentinc/cp-zookeeper:latest
@@ -63,6 +92,12 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_SERVER_ID: 1
       ZOOKEEPER_SERVERS: zoo1:2888:3888
+    healthcheck:
+      test: echo stat | nc localhost 2181
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   kafka1:
     image: confluentinc/cp-kafka:latest
@@ -77,30 +112,13 @@ services:
       KAFKA_ZOOKEEPER_CONNECT: "zoo1:2181"
       KAFKA_BROKER_ID: 1
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     depends_on:
-      - zoo1
-
-
-  # zookeeper:
-  #   image: confluentinc/cp-zookeeper:latest
-  #   environment:
-  #     ZOOKEEPER_CLIENT_PORT: 2181
-  #     ZOOKEEPER_TICK_TIME: 2000
-  #   ports:
-  #     - "22181:2181"
-  
-  # kafka:
-  #   image: confluentinc/cp-kafka:latest
-  #   container_name: kafka
-  #   depends_on:
-  #     - zookeeper
-  #   ports:
-  #     - "29092:29092"  # Exposing 29092 to the host
-  #   environment:
-  #     KAFKA_BROKER_ID: 1
-  #     KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-  #     KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
-  #     KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
-  #     KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-  #     KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-  #     KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      zoo1:
+        condition: service_healthy
+    healthcheck:
+      test: kafka-topics --bootstrap-server kafka1:19092 --list || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
