@@ -29,6 +29,9 @@ db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
 
+"""
+Setup Kafka producer
+"""
 
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_SERVERS', 'kafka1:19092').split(',')
 STOCK_TOPIC = 'stock-topic'
@@ -160,6 +163,9 @@ def add_item(order_id: str, item_id: str, quantity: int):
         return abort(400, DB_ERROR_STR)
     
     # Send request to stock service to update stock
+    """
+    This is a placeholder for the add_item function. It will send a message to the stock service with the stock change information.
+    """
     producer.send(
         STOCK_TOPIC,
         key=order_id.encode(),
@@ -211,6 +217,11 @@ def checkout(order_id: str):
     # app.logger.debug("Checkout successful")
     # return Response("Checkout successful", status=200)
 
+
+    """
+    This is a placeholder for the checkout function. It will send a message to the payment and stock services with their respective information.
+    """
+
     producer.send(
         PAYMENT_TOPIC,
         key=order_id.encode(),
@@ -257,6 +268,9 @@ def start_order_consumer():
             app.logger.error(f"Error processing message: {message.value} - {e}")
 
 
+"""
+This will start the consumer in a separate thread so that it does not block the main thread.
+"""
 import threading
 threading.Thread(target=start_order_consumer, daemon=True).start()
 

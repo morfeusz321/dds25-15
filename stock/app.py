@@ -21,6 +21,11 @@ db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
 
+
+"""
+Setup Kafka producer
+"""
+
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_SERVERS', 'kafka1:19092').split(',')
 STOCK_TOPIC = 'stock-topic'
 ORDER_TOPIC = 'order-topic'
@@ -124,19 +129,21 @@ def remove_stock(item_id: str, amount: int):
 
 def process_stock_event(value: dict):
     """
-    Process stock event, update stock and forward to ORDER_TOPIC
+    Here we process the stock event and update the stock accordingly and send a message to the order service about the status.
     """
     try:
         app.logger.debug(f"Processing payment event: {value}")
         
-        # Make sure order_id exists in the value
         if 'order_id' not in value:
             app.logger.error(f"Invalid message format: missing order_id")
             return
             
         order_id = value['order_id'] + '1'
-        
-        # Forward the message to ORDER_TOPIC
+
+
+        """
+        Placeholder send
+        """ 
         producer.send(
             ORDER_TOPIC,
             key=order_id.encode() if isinstance(order_id, str) else str(order_id).encode(),
@@ -163,7 +170,9 @@ def start_stock_consumer():
         except Exception as e:
             app.logger.error(f"Error processing stock event: {e}")
 
-
+"""
+Start the stock consumer in a separate thread so it does not block the main thread.
+"""
 import threading
 threading.Thread(target=start_stock_consumer, daemon=True).start()
 

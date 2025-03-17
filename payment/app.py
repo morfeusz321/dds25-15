@@ -24,6 +24,9 @@ db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
 
+"""
+Setup Kafka producer
+"""
 
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_SERVERS', 'kafka1:19092').split(',')
 PAYMENT_TOPIC = 'payment-topic'
@@ -126,19 +129,20 @@ def remove_credit(user_id: str, amount: int):
 
 def process_payment_event(value: dict):
     """
-    Process payment event, update user credit and send order event
+    Here we process the payment event and send the payment status to the order service.
     """
     try:
         app.logger.debug(f"Processing payment event: {value}")
         
-        # Make sure order_id exists in the value
         if 'order_id' not in value:
             app.logger.error(f"Invalid message format: missing order_id")
             return
             
         order_id = value['order_id']
         
-        # Forward the message to ORDER_TOPIC
+        """
+        Placeholder send
+        """
         producer.send(
             ORDER_TOPIC,
             key=order_id.encode() if isinstance(order_id, str) else str(order_id).encode(),
@@ -149,12 +153,6 @@ def process_payment_event(value: dict):
     except Exception as e:
         app.logger.error(f"Failed to process payment: {str(e)}")
     
-
-   
-
-    # print(f"Payment processed for order: {order_id}")
-    # app.logger.debug(f"Payment processed for order: {order_id}")
-    # return Response(f"Payment processed for order: {order_id}", status=200)
 
 
 def start_payment_consumer():
@@ -172,7 +170,9 @@ def start_payment_consumer():
         except Exception as e:
             app.logger.error(f"Error processing payment event: {e}")
 
-
+"""
+This creates a new thread to start the payment consumer so it does not block the main thread.
+"""
 import threading
 threading.Thread(target=start_payment_consumer, daemon=True).start()
 
