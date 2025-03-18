@@ -1,12 +1,11 @@
 import logging
 import os
 import atexit
+import pickle
 import uuid
-import json
 
 import redis
 from kafka import KafkaProducer, KafkaConsumer
-from kafka.errors import KafkaError
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
@@ -36,7 +35,8 @@ ORDER_TOPIC = 'order-topic'
 
 producer = KafkaProducer(
     bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+    key_serializer=lambda k: pickle.dumps(k),
+    value_serializer=lambda v: pickle.dumps(v),
     retries=5
 )
 
@@ -50,6 +50,12 @@ atexit.register(close_db_connection)
 
 class UserValue(Struct):
     credit: int
+
+class OrderValue(Struct):
+    paid: bool
+    items: list[tuple[str, int]]
+    user_id: str
+    total_cost: int
 
 
 def get_user_from_db(user_id: str) -> UserValue | None:
@@ -128,32 +134,15 @@ def remove_credit(user_id: str, amount: int):
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
 
-def process_payment_event(value: dict):
-    """
-    Here we process the payment event and send the payment status to the order service.
-    """
-    try:
-        print(f"Processing payment event: {value}")
-        
-        if 'order_id' not in value:
-            app.logger.error(f"Invalid message format: missing order_id")
-            return
-            
-        order_id = value['order_id']
-        
-        """
-        Placeholder send
-        """
-        producer.send(
-            ORDER_TOPIC,
-            key=order_id.encode() if isinstance(order_id, str) else str(order_id).encode(),
-            value=value
-        )
-        
-        print(f"Payment processed for order: {order_id}")
-    except Exception as e:
-        app.logger.error(f"Failed to process payment: {str(e)}")
-    
+"""
+Here we process the payment event and send the payment status to the order service.
+"""
+def process_payment_event(message):
+    order_id, order = message.value
+
+    if message.key == "make_payment":
+        remove_credit(order.user_id, order.total_cost)
+        producer.send(ORDER_TOPIC, key="payment_made", value=order_id)
 
 
 def start_payment_consumer():
@@ -162,12 +151,13 @@ def start_payment_consumer():
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         group_id='payment-group',
         auto_offset_reset='earliest',
-        value_deserializer=lambda m: json.loads(m.decode('utf-8'))
+        key_deserializer=lambda k: pickle.loads(k),
+        value_deserializer=lambda v: pickle.loads(v)
     )
 
     for message in consumer:
         try:
-            process_payment_event(message.value)
+            process_payment_event(message)
         except Exception as e:
             app.logger.error(f"Error processing payment event: {e}")
 

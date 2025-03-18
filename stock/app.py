@@ -2,7 +2,7 @@ import logging
 import os
 import atexit
 import uuid
-import json
+import pickle
 
 import redis
 from kafka import KafkaProducer, KafkaConsumer
@@ -32,7 +32,8 @@ ORDER_TOPIC = 'order-topic'
 
 producer = KafkaProducer(
     bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+    key_serializer=lambda k: pickle.dumps(k),
+    value_serializer=lambda v: pickle.dumps(v),
     retries=5
 )
 
@@ -47,6 +48,12 @@ atexit.register(close_db_connection)
 class StockValue(Struct):
     stock: int
     price: int
+
+class OrderValue(Struct):
+    paid: bool
+    items: list[tuple[str, int]]
+    user_id: str
+    total_cost: int
 
 
 def get_item_from_db(item_id: str) -> StockValue | None:
@@ -127,33 +134,15 @@ def remove_stock(item_id: str, amount: int):
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
-def process_stock_event(value: dict):
-    """
-    Here we process the stock event and update the stock accordingly and send a message to the order service about the status.
-    """
-    try:
-        print(f"Processing stock event: {value}")
-        
-        if 'order_id' not in value:
-            app.logger.error(f"Invalid message format: missing order_id")
-            return
-            
-        order_id = value['order_id'] + '1'
+def process_stock_event(message):
+    order_id, order = message.value
 
+    if message.key == "subtract_stock":
+        for item_id, amount in order.items:
+            #TODO: make sure that if some get removed but not all then rollback
+            remove_stock(item_id, amount)
 
-        """
-        Placeholder send
-        """ 
-        producer.send(
-            ORDER_TOPIC,
-            key=order_id.encode() if isinstance(order_id, str) else str(order_id).encode(),
-            value=value
-        )
-        
-        print(f"Stock processed for order: {order_id}")
-    except Exception as e:
-        app.logger.error(f"Failed to process payment: {str(e)}")
-
+        producer.send(ORDER_TOPIC, key="stock_subtracted", value=order_id)
 
 def start_stock_consumer():
     consumer = KafkaConsumer(
@@ -161,12 +150,13 @@ def start_stock_consumer():
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         group_id='stock-group',
         auto_offset_reset='earliest',
-        value_deserializer=lambda m: json.loads(m.decode('utf-8'))
+        key_deserializer=lambda k: pickle.loads(k),
+        value_deserializer=lambda v: pickle.loads(v)
     )
 
     for message in consumer:
         try:
-            process_stock_event(message.value)
+            process_stock_event(message)
         except Exception as e:
             app.logger.error(f"Error processing stock event: {e}")
 
