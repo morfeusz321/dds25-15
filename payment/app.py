@@ -17,6 +17,7 @@ DB_ERROR_STR = "DB error"
 
 app = Flask("payment-service")
 
+app.logger.setLevel(logging.DEBUG)
 
 
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
@@ -132,7 +133,7 @@ def process_payment_event(value: dict):
     Here we process the payment event and send the payment status to the order service.
     """
     try:
-        app.logger.debug(f"Processing payment event: {value}")
+        print(f"Processing payment event: {value}")
         
         if 'order_id' not in value:
             app.logger.error(f"Invalid message format: missing order_id")
@@ -149,7 +150,7 @@ def process_payment_event(value: dict):
             value=value
         )
         
-        app.logger.debug(f"Payment processed for order: {order_id}")
+        print(f"Payment processed for order: {order_id}")
     except Exception as e:
         app.logger.error(f"Failed to process payment: {str(e)}")
     

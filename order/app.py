@@ -239,7 +239,7 @@ def checkout(order_id: str):
         }
     )
     
-    app.logger.debug(f"Checkout successful for order: {order_id}")
+    print(f"Checkout successful for order: {order_id}")
     return Response("Checkout successful", status=200)
 
 
@@ -250,7 +250,7 @@ def process_order_event(value: dict):
     If the order is not paid but the stock has been subtracted, it will rollback the stock.
     and more.
     """
-    app.logger.debug(f"Processing order event: {value}")
+    print(f"Processing order event: {value}")
 
 def start_order_consumer():
     consumer = KafkaConsumer(

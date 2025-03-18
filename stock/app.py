@@ -66,7 +66,7 @@ def get_item_from_db(item_id: str) -> StockValue | None:
 @app.post('/item/create/<price>')
 def create_item(price: int):
     key = str(uuid.uuid4())
-    app.logger.debug(f"Item: {key} created")
+    print(f"Item: {key} created")
     value = msgpack.encode(StockValue(stock=0, price=int(price)))
     try:
         db.set(key, value)
@@ -117,7 +117,7 @@ def remove_stock(item_id: str, amount: int):
     item_entry: StockValue = get_item_from_db(item_id)
     # update stock, serialize and update database
     item_entry.stock -= int(amount)
-    app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}")
+    print(f"Item: {item_id} stock updated to: {item_entry.stock}")
     if item_entry.stock < 0:
         abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
     try:
@@ -132,7 +132,7 @@ def process_stock_event(value: dict):
     Here we process the stock event and update the stock accordingly and send a message to the order service about the status.
     """
     try:
-        app.logger.debug(f"Processing payment event: {value}")
+        print(f"Processing stock event: {value}")
         
         if 'order_id' not in value:
             app.logger.error(f"Invalid message format: missing order_id")
@@ -150,7 +150,7 @@ def process_stock_event(value: dict):
             value=value
         )
         
-        app.logger.debug(f"Payment processed for order: {order_id}")
+        print(f"Stock processed for order: {order_id}")
     except Exception as e:
         app.logger.error(f"Failed to process payment: {str(e)}")
 
