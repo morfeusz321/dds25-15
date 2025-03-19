@@ -21,6 +21,9 @@ GATEWAY_URL = os.environ['GATEWAY_URL']
 
 app = Flask("order-service")
 
+# temporary hashmap to keep track of order responses cannot be used if we want crash tolerance for order service, 
+# or if order is going to have multiple instances
+order_responses = {}
 
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
@@ -155,6 +158,7 @@ def add_item(order_id: str, item_id: str, quantity: int):
         # Request failed because item does not exist
         abort(400, f"Item: {item_id} does not exist!")
     item_json: dict = item_reply.json()
+    #TODO: check if item is already in order and update quantity instead of adding a new item with the same id
     order_entry.items.append((item_id, int(quantity)))
     order_entry.total_cost += int(quantity) * item_json["price"]
     try:
@@ -172,6 +176,12 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
+
+    # None means no message was received, True means success, False means failure
+    # [stock_subtracted, payment_made]
+    order_responses[order_id] = [None, None]
+    
+    app.logger.info(f"Checkout started for order: {order_responses}")
     order_entry: OrderValue = get_order_from_db(order_id)
 
     if order_entry.paid:
@@ -200,12 +210,42 @@ If the order is not paid but the stock has been subtracted, it will rollback the
 and more.
 """
 def process_order_event(message):
-    order_id: str = message.value
+    order_id, order = message.value
+
     if message.key == "stock_subtracted":
-        app.logger.info(f"Stock subtracted for order: {order_id}")
+        order_responses[order_id][0] = True
+        app.logger.info(f"Stock subtracted for order: {order_responses}")
+        if order_responses[order_id][1] == True:
+            #TODO: what happens if another checkout gets started before this one completes
+            order.paid = True
+            db.set(order_id, msgpack.encode(order))
+            app.logger.info(f"Order: {order_id} completed")
+        elif order_responses[order_id][1] == False:
+            producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+            
     elif message.key == "payment_made":
-        app.logger.info(f"Payment made for order: {order_id}")
-    #TODO: after receiving both events for a given order_id we can mark the order as completed
+        order_responses[order_id][1] = True
+        app.logger.info(f"Payment made for order: {order_responses}")
+        if order_responses[order_id][0] == True:
+            #TODO: what happens if another checkout gets started before this one completes
+            order.paid = True
+            db.set(order_id, msgpack.encode(order))
+            app.logger.info(f"Order: {order_id} completed")
+        elif order_responses[order_id][0] == False:
+            producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+            
+    elif message.key == "stock_subtraction_failed":
+        order_responses[order_id][0] = False
+        app.logger.info(f"Stock subtraction failed for order: {order_responses}")
+        if order_responses[order_id][1] == True:
+            producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+            
+    elif message.key == "payment_failed":
+        order_responses[order_id][1] = False
+        app.logger.info(f"Payment failed for order: {order_responses}")
+        if order_responses[order_id][0] == True:
+            producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+    
 
 def start_order_consumer():
     consumer = KafkaConsumer(
@@ -221,7 +261,7 @@ def start_order_consumer():
         try:
             process_order_event(message)
         except Exception as e:
-            app.logger.error(f"Error processing order event: {e}")
+            app.logger.error(f"Error processing order event: {e.__cause__}")
 
 
 """

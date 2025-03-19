@@ -141,8 +141,21 @@ def process_payment_event(message):
     order_id, order = message.value
 
     if message.key == "make_payment":
-        remove_credit(order.user_id, order.total_cost)
-        producer.send(ORDER_TOPIC, key="payment_made", value=order_id)
+        try:
+            remove_credit(order.user_id, order.total_cost)
+        except Exception as e:
+            producer.send(ORDER_TOPIC, key="payment_failed", value=(order_id, order))
+            return abort(400, f"Error removing credit: {e}")
+        
+        producer.send(ORDER_TOPIC, key="payment_made", value=(order_id, order))
+
+    elif message.key == "rollback_payment":
+        try:
+            add_credit(order.user_id, order.total_cost)
+            app.logger.info(f"Credit rolled back for order: {order_id}")
+        except Exception as e:
+            #TODO: in this case we should just retry no need for any other rollback
+            return abort(400, f"Error rolling back credit: {e}")
 
 
 def start_payment_consumer():
@@ -159,7 +172,7 @@ def start_payment_consumer():
         try:
             process_payment_event(message)
         except Exception as e:
-            app.logger.error(f"Error processing payment event: {e}")
+            app.logger.error(f"Error processing payment event: {e.__cause__}")
 
 """
 This creates a new thread to start the payment consumer so it does not block the main thread.

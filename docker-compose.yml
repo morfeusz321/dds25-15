@@ -36,6 +36,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    ports:
+      - "6379:6379"
 
   stock-service:
     build: ./stock
@@ -60,6 +62,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    ports:
+      - "6380:6379"
 
   payment-service:
     build: ./payment
@@ -84,6 +88,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    ports:
+      - "6381:6379"
 
   zoo1:
     image: confluentinc/cp-zookeeper:latest

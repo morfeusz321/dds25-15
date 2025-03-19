@@ -138,12 +138,25 @@ def process_stock_event(message):
     order_id, order = message.value
 
     if message.key == "subtract_stock":
-        for item_id, amount in order.items:
-            #TODO: make sure that if some get removed but not all then rollback
-            remove_stock(item_id, amount)
+        try:
+            for item_id, amount in order.items:
+                #TODO: make sure that if some get removed but not all then rollback locally
+                remove_stock(item_id, amount)
+        except Exception as e:
+            producer.send(ORDER_TOPIC, key="stock_subtraction_failed", value=(order_id, order))
+            return abort(400, f"Error subtracting stock: {e}")
 
-        producer.send(ORDER_TOPIC, key="stock_subtracted", value=order_id)
+        producer.send(ORDER_TOPIC, key="stock_subtracted", value=(order_id, order))
 
+    elif message.key == "rollback_stock":
+        try:
+            for item_id, amount in order.items:
+                add_stock(item_id, amount)
+                app.logger.info(f"Stock rolled back for order: {order_id}")
+        except Exception as e:
+            #TODO: in this case we should just retry no need for any other rollback but be sure to only retry the failed items
+            return abort(400, f"Error rolling back stock: {e}")
+        
 def start_stock_consumer():
     consumer = KafkaConsumer(
         STOCK_TOPIC,
@@ -158,7 +171,7 @@ def start_stock_consumer():
         try:
             process_stock_event(message)
         except Exception as e:
-            app.logger.error(f"Error processing stock event: {e}")
+            app.logger.error(f"Error processing stock event: {e.__cause__}")
 
 """
 Start the stock consumer in a separate thread so it does not block the main thread.
