@@ -3,30 +3,57 @@ import os
 import atexit
 import random
 import uuid
-from collections import defaultdict
+import pickle
 
 import redis
 import requests
+from kafka import KafkaProducer, KafkaConsumer
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 
+import threading
+from collections import defaultdict
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
 
 GATEWAY_URL = os.environ['GATEWAY_URL']
 
+
 app = Flask("order-service")
+
+# temporary hashmap to keep track of order responses cannot be used if we want crash tolerance for order service, 
+# or if order is going to have multiple instances
+# indemopotency key 
+order_responses = {}
+order_locks = defaultdict(threading.Lock)
 
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
 
+"""
+Setup Kafka producer
+"""
+
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_SERVERS', 'kafka1:19092').split(',')
+STOCK_TOPIC = 'stock-topic'
+PAYMENT_TOPIC = 'payment-topic'
+ORDER_TOPIC = 'order-topic'
+
+producer = KafkaProducer(
+    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+    key_serializer=lambda k: pickle.dumps(k),
+    value_serializer=lambda v: pickle.dumps(v),
+    retries=5
+)
+
 
 def close_db_connection():
     db.close()
+    producer.close()
 
 
 atexit.register(close_db_connection)
@@ -125,12 +152,17 @@ def send_get_request(url: str):
 
 @app.post('/addItem/<order_id>/<item_id>/<quantity>')
 def add_item(order_id: str, item_id: str, quantity: int):
+    """
+    Add item does not need to communicate with any other services we decided to just check the availability of the item
+    at the checkout.
+    """
     order_entry: OrderValue = get_order_from_db(order_id)
     item_reply = send_get_request(f"{GATEWAY_URL}/stock/find/{item_id}")
     if item_reply.status_code != 200:
         # Request failed because item does not exist
         abort(400, f"Item: {item_id} does not exist!")
     item_json: dict = item_reply.json()
+    #TODO: check if item is already in order and update quantity instead of adding a new item with the same id
     order_entry.items.append((item_id, int(quantity)))
     order_entry.total_cost += int(quantity) * item_json["price"]
     try:
@@ -148,35 +180,117 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
-    app.logger.debug(f"Checking out {order_id}")
-    order_entry: OrderValue = get_order_from_db(order_id)
-    # get the quantity per item
-    items_quantities: dict[str, int] = defaultdict(int)
-    for item_id, quantity in order_entry.items:
-        items_quantities[item_id] += quantity
-    # The removed items will contain the items that we already have successfully subtracted stock from
-    # for rollback purposes.
-    removed_items: list[tuple[str, int]] = []
-    for item_id, quantity in items_quantities.items():
-        stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
-        if stock_reply.status_code != 200:
-            # If one item does not have enough stock we need to rollback
-            rollback_stock(removed_items)
-            abort(400, f'Out of stock on item_id: {item_id}')
-        removed_items.append((item_id, quantity))
-    user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
-    if user_reply.status_code != 200:
-        # If the user does not have enough credit we need to rollback all the item stock subtractions
-        rollback_stock(removed_items)
-        abort(400, "User out of credit")
-    order_entry.paid = True
-    try:
-        db.set(order_id, msgpack.encode(order_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    app.logger.debug("Checkout successful")
-    return Response("Checkout successful", status=200)
 
+    # None means no message was received, True means success, False means failure
+    # [stock_subtracted, payment_made]
+    order_responses[order_id] = [None, None] 
+    # TODO add some sort of lock to read at all time write only one 
+    
+    app.logger.info(f"Checkout started for order: {order_responses}")
+    order_entry: OrderValue = get_order_from_db(order_id)
+
+    if order_entry.paid:
+        abort(400, f"Order: {order_id} has already been paid!")
+
+    #send payment event with the amount to payment service
+    producer.send(
+        PAYMENT_TOPIC,
+        key="make_payment",
+        value=(order_id, order_entry)
+    )
+
+    #send stock event with the items to stock service
+    producer.send(
+        STOCK_TOPIC,
+        key="subtract_stock",
+        value=(order_id, order_entry)
+    )
+    
+    return Response(f"Checkout for order {order_id} is processing...", status=200)
+
+
+"""
+This function will check if the order is paid and there is enough stock to fulfill the order.
+If the order is not paid but the stock has been subtracted, it will rollback the stock.
+and more.
+"""
+
+process_order_lock = threading.Lock()
+
+def process_order_event(message):
+    # print thread name
+    with process_order_lock:
+        print("this thread is touching me: ", threading.current_thread().name)
+
+        order_id, order = message.value
+        with order_locks[order_id]:
+            if message.key == "stock_subtracted":
+                app.logger.info(f"Before: Stock subtracted for order: {order_responses}")
+                order_responses[order_id][0] = True
+                app.logger.info(f"After: Stock subtracted for order: {order_responses}")
+                if order_responses[order_id][1] == True:
+                    order.paid = True
+                    db.set(order_id, msgpack.encode(order))
+                    app.logger.info(f"Order: {order_id} completed")
+                elif order_responses[order_id][1] == False:
+                    producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+                    
+            elif message.key == "payment_made":
+                app.logger.info(f"Before: Payment made for order: {order_responses}")
+                order_responses[order_id][1] = True
+                app.logger.info(f"After: Payment made for order: {order_responses}")
+                if order_responses[order_id][0] == True:
+                    order.paid = True
+                    db.set(order_id, msgpack.encode(order))
+                    app.logger.info(f"Order: {order_id} completed")
+                elif order_responses[order_id][0] == False:
+                    producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+                    
+            elif message.key == "stock_subtraction_failed":
+                app.logger.info(f"Before: Stock subtraction failed for order: {order_responses}")
+                order_responses[order_id][0] = False
+                app.logger.info(f"After: Stock subtraction failed for order: {order_responses}")
+                if order_responses[order_id][1] == True:
+                    producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+                    
+            elif message.key == "payment_failed":
+                app.logger.info(f"Before: Payment failed for order: {order_responses}")
+                order_responses[order_id][1] = False
+                app.logger.info(f"After: Payment failed for order: {order_responses}")
+                if order_responses[order_id][0] == True:
+                    producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+
+def start_order_consumer():
+    consumer = KafkaConsumer(
+        ORDER_TOPIC,
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        key_deserializer=lambda k: pickle.loads(k),
+        value_deserializer=lambda v: pickle.loads(v),
+        group_id='order-group',
+        auto_offset_reset='earliest'
+    )
+
+    for message in consumer:
+        # print the number of threads
+        try:
+            # print("NUMBER OF ACTIVE THREADS ", threading.active_count())
+            process_order_event(message)
+        except Exception as e:
+            app.logger.error(f"Error processing order event: {e.__cause__}")
+
+
+"""
+This will start the consumer in a separate thread so that it does not block the main thread.
+"""
+
+# threading.Thread(target=start_order_consumer, daemon=True, ).start()
+# start_order_consumer() with one single thread
+t1 = threading.Thread(target=start_order_consumer)
+
+t1.start()
+
+
+# start_order_consumer()
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

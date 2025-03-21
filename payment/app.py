@@ -1,9 +1,11 @@
 import logging
 import os
 import atexit
+import pickle
 import uuid
 
 import redis
+from kafka import KafkaProducer, KafkaConsumer
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
@@ -11,16 +13,36 @@ from flask import Flask, jsonify, abort, Response
 DB_ERROR_STR = "DB error"
 
 
+
 app = Flask("payment-service")
+
+app.logger.setLevel(logging.DEBUG)
+
 
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
 
+"""
+Setup Kafka producer
+"""
+
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_SERVERS', 'kafka1:19092').split(',')
+PAYMENT_TOPIC = 'payment-topic'
+ORDER_TOPIC = 'order-topic'
+
+
+producer = KafkaProducer(
+    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+    key_serializer=lambda k: pickle.dumps(k),
+    value_serializer=lambda v: pickle.dumps(v),
+    retries=5
+)
 
 def close_db_connection():
     db.close()
+    producer.close()
 
 
 atexit.register(close_db_connection)
@@ -28,6 +50,12 @@ atexit.register(close_db_connection)
 
 class UserValue(Struct):
     credit: int
+
+class OrderValue(Struct):
+    paid: bool
+    items: list[tuple[str, int]]
+    user_id: str
+    total_cost: int
 
 
 def get_user_from_db(user_id: str) -> UserValue | None:
@@ -105,6 +133,52 @@ def remove_credit(user_id: str, amount: int):
         return abort(400, DB_ERROR_STR)
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
+
+"""
+Here we process the payment event and send the payment status to the order service.
+"""
+def process_payment_event(message):
+    order_id, order = message.value
+
+    if message.key == "make_payment":
+        try:
+            remove_credit(order.user_id, order.total_cost)
+        except Exception as e:
+            producer.send(ORDER_TOPIC, key="payment_failed", value=(order_id, order))
+            return abort(400, f"Error removing credit: {e}")
+        
+        producer.send(ORDER_TOPIC, key="payment_made", value=(order_id, order))
+
+    elif message.key == "rollback_payment":
+        try:
+            add_credit(order.user_id, order.total_cost)
+            app.logger.info(f"Credit rolled back for order: {order_id}")
+        except Exception as e:
+            #TODO: in this case we should just retry no need for any other rollback
+            return abort(400, f"Error rolling back credit: {e}")
+
+
+def start_payment_consumer():
+    consumer = KafkaConsumer(
+        PAYMENT_TOPIC,
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        group_id='payment-group',
+        auto_offset_reset='earliest',
+        key_deserializer=lambda k: pickle.loads(k),
+        value_deserializer=lambda v: pickle.loads(v)
+    )
+
+    for message in consumer:
+        try:
+            process_payment_event(message)
+        except Exception as e:
+            app.logger.error(f"Error processing payment event: {e.__cause__}")
+
+"""
+This creates a new thread to start the payment consumer so it does not block the main thread.
+"""
+import threading
+threading.Thread(target=start_payment_consumer, daemon=True).start()
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)
