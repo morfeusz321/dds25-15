@@ -25,6 +25,7 @@ app = Flask("order-service")
 
 # temporary hashmap to keep track of order responses cannot be used if we want crash tolerance for order service, 
 # or if order is going to have multiple instances
+# indemopotency key 
 order_responses = {}
 order_locks = defaultdict(threading.Lock)
 
@@ -213,44 +214,51 @@ This function will check if the order is paid and there is enough stock to fulfi
 If the order is not paid but the stock has been subtracted, it will rollback the stock.
 and more.
 """
+
+process_order_lock = threading.Lock()
+
 def process_order_event(message):
-    order_id, order = message.value
-    with order_locks[order_id]:
-        
-        if message.key == "stock_subtracted":
-            order_responses[order_id][0] = True
-            app.logger.info(f"Stock subtracted for order: {order_responses}")
-            if order_responses[order_id][1] == True:
-                #TODO: what happens if another checkout gets started before this one completes
-                order.paid = True
-                db.set(order_id, msgpack.encode(order))
-                app.logger.info(f"Order: {order_id} completed")
-            elif order_responses[order_id][1] == False:
-                producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
-                
-        elif message.key == "payment_made":
-            order_responses[order_id][1] = True
-            app.logger.info(f"Payment made for order: {order_responses}")
-            if order_responses[order_id][0] == True:
-                #TODO: what happens if another checkout gets started before this one completes
-                order.paid = True
-                db.set(order_id, msgpack.encode(order))
-                app.logger.info(f"Order: {order_id} completed")
-            elif order_responses[order_id][0] == False:
-                producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
-                
-        elif message.key == "stock_subtraction_failed":
-            order_responses[order_id][0] = False
-            app.logger.info(f"Stock subtraction failed for order: {order_responses}")
-            if order_responses[order_id][1] == True:
-                producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
-                
-        elif message.key == "payment_failed":
-            order_responses[order_id][1] = False
-            app.logger.info(f"Payment failed for order: {order_responses}")
-            if order_responses[order_id][0] == True:
-                producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
-    
+    # print thread name
+    with process_order_lock:
+        print("this thread is touching me: ", threading.current_thread().name)
+
+        order_id, order = message.value
+        with order_locks[order_id]:
+            if message.key == "stock_subtracted":
+                app.logger.info(f"Before: Stock subtracted for order: {order_responses}")
+                order_responses[order_id][0] = True
+                app.logger.info(f"After: Stock subtracted for order: {order_responses}")
+                if order_responses[order_id][1] == True:
+                    order.paid = True
+                    db.set(order_id, msgpack.encode(order))
+                    app.logger.info(f"Order: {order_id} completed")
+                elif order_responses[order_id][1] == False:
+                    producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+                    
+            elif message.key == "payment_made":
+                app.logger.info(f"Before: Payment made for order: {order_responses}")
+                order_responses[order_id][1] = True
+                app.logger.info(f"After: Payment made for order: {order_responses}")
+                if order_responses[order_id][0] == True:
+                    order.paid = True
+                    db.set(order_id, msgpack.encode(order))
+                    app.logger.info(f"Order: {order_id} completed")
+                elif order_responses[order_id][0] == False:
+                    producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+                    
+            elif message.key == "stock_subtraction_failed":
+                app.logger.info(f"Before: Stock subtraction failed for order: {order_responses}")
+                order_responses[order_id][0] = False
+                app.logger.info(f"After: Stock subtraction failed for order: {order_responses}")
+                if order_responses[order_id][1] == True:
+                    producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+                    
+            elif message.key == "payment_failed":
+                app.logger.info(f"Before: Payment failed for order: {order_responses}")
+                order_responses[order_id][1] = False
+                app.logger.info(f"After: Payment failed for order: {order_responses}")
+                if order_responses[order_id][0] == True:
+                    producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
 
 def start_order_consumer():
     consumer = KafkaConsumer(
@@ -263,7 +271,9 @@ def start_order_consumer():
     )
 
     for message in consumer:
+        # print the number of threads
         try:
+            # print("NUMBER OF ACTIVE THREADS ", threading.active_count())
             process_order_event(message)
         except Exception as e:
             app.logger.error(f"Error processing order event: {e.__cause__}")
@@ -272,8 +282,15 @@ def start_order_consumer():
 """
 This will start the consumer in a separate thread so that it does not block the main thread.
 """
-import threading
-threading.Thread(target=start_order_consumer, daemon=True).start()
+
+# threading.Thread(target=start_order_consumer, daemon=True, ).start()
+# start_order_consumer() with one single thread
+t1 = threading.Thread(target=start_order_consumer)
+
+t1.start()
+
+
+# start_order_consumer()
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)
