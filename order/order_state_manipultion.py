@@ -1,4 +1,5 @@
 import redis 
+import threading
 
 def init_checkout_state(db, order_id: str):
     """Initialize the checkout state for an order. If the state already exists, return and error."""
@@ -8,19 +9,18 @@ def init_checkout_state(db, order_id: str):
         # get the state of the order
         state = get_check_state(db, order_id)
 
-        if state["stock_subtracted"] ==  -1 and state["payment_made"] == -1:
+        if state["stock_subtracted"] ==  -1 or state["payment_made"] == -1:
             return "Order already in progress"
 
         if state["stock_subtracted"] == 1 and state["payment_made"] == 1:
             return "Order already completed"
-        
         
     
     db.hset(f"checkout_state:{order_id}", mapping={
         "stock_subtracted": -1,
         "payment_made": -1
     })
-    return "Order state initialized"
+    return "Order state initialized " + threading.current_thread().name
 
 def update_checkout_statedb (db, order_id: str, field: str, value: int):
     """Thread-safe update for a specific order's checkout state using Redis transactions."""

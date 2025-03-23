@@ -144,6 +144,7 @@ def process_payment_event(message):
         try:
             remove_credit(order.user_id, order.total_cost)
         except Exception as e:
+            print(f"Error removing credit: {e}")
             producer.send(ORDER_TOPIC, key="payment_failed", value=(order_id, order))
             return abort(400, f"Error removing credit: {e}")
         

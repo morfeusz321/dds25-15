@@ -230,22 +230,32 @@ def process_order_event(message):
 
     if message.key == "stock_subtracted":
         update_checkout_statedb(db, order_id, "stock_subtracted", 1)
-        print("Stock subtracted")
+        print("Stock subtracted and state " + str(get_check_state(db, order_id)))
         if get_check_state(db, order_id)["payment_made"] == 1:
+            print("Payment made")
             order.paid = True
             db.set(order_id, msgpack.encode(order))
             print(f"Order: {order_id} completed")
         elif get_check_state(db, order_id)["payment_made"] == 0:
-            producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+            print("Payment not made rolling back stock")
+            producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+
+
+
     elif message.key == "payment_made":
         update_checkout_statedb(db, order_id, "payment_made", 1)
-        print("Payment made")
+        print("Payment made and state " + str(get_check_state(db, order_id)))
+
         if get_check_state(db, order_id)["stock_subtracted"] == 1:
             order.paid = True
             db.set(order_id, msgpack.encode(order))
             print(f"Order: {order_id} completed")
         elif get_check_state(db, order_id)["stock_subtracted"] == 0:
-            producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+            print("Stock not subtracted rolling back payment")
+            producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+
+
+
     elif message.key == "stock_subtraction_failed":
         update_checkout_statedb(db, order_id, "stock_subtracted", 0)
         print("Stock subtraction failed")
@@ -257,43 +267,7 @@ def process_order_event(message):
         if get_check_state(db, order_id)["stock_subtracted"] == 1:
             producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
 
-
-    # with order_locks[order_id]:
-    #     if message.key == "stock_subtracted":
-    #         app.logger.info(f"Before: Stock subtracted for order: {order_responses}")
-    #         order_responses[order_id][0] = True
-    #         app.logger.info(f"After: Stock subtracted for order: {order_responses}")
-    #         if order_responses[order_id][1] == True:
-    #             order.paid = True
-    #             db.set(order_id, msgpack.encode(order))
-    #             app.logger.info(f"Order: {order_id} completed")
-    #         elif order_responses[order_id][1] == False:
-    #             producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
-                    
-    #     elif message.key == "payment_made":
-    #         app.logger.info(f"Before: Payment made for order: {order_responses}")
-    #         order_responses[order_id][1] = True
-    #         app.logger.info(f"After: Payment made for order: {order_responses}")
-    #         if order_responses[order_id][0] == True:
-    #             order.paid = True
-    #             db.set(order_id, msgpack.encode(order))
-    #             app.logger.info(f"Order: {order_id} completed")
-    #         elif order_responses[order_id][0] == False:
-    #             producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
-                
-    #     elif message.key == "stock_subtraction_failed":
-    #         app.logger.info(f"Before: Stock subtraction failed for order: {order_responses}")
-    #         order_responses[order_id][0] = False
-    #         app.logger.info(f"After: Stock subtraction failed for order: {order_responses}")
-    #         if order_responses[order_id][1] == True:
-    #             producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
-                
-    #     elif message.key == "payment_failed":
-    #         app.logger.info(f"Before: Payment failed for order: {order_responses}")
-    #         order_responses[order_id][1] = False
-    #         app.logger.info(f"After: Payment failed for order: {order_responses}")
-    #         if order_responses[order_id][0] == True:
-    #             producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+            
 
 def start_order_consumer():
     consumer = KafkaConsumer(
