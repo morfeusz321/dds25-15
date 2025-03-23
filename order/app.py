@@ -228,36 +228,36 @@ def process_order_event(message):
                 app.logger.info(f"Before: Stock subtracted for order: {order_responses}")
                 order_responses[order_id][0] = True
                 app.logger.info(f"After: Stock subtracted for order: {order_responses}")
-                if order_responses[order_id][1] == True:
+                if order_responses[order_id][1]:
                     order.paid = True
                     db.set(order_id, msgpack.encode(order))
                     app.logger.info(f"Order: {order_id} completed")
-                elif order_responses[order_id][1] == False:
+                elif not order_responses[order_id][1]:
                     producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
                     
             elif message.key == "payment_made":
                 app.logger.info(f"Before: Payment made for order: {order_responses}")
                 order_responses[order_id][1] = True
                 app.logger.info(f"After: Payment made for order: {order_responses}")
-                if order_responses[order_id][0] == True:
+                if order_responses[order_id][0]:
                     order.paid = True
                     db.set(order_id, msgpack.encode(order))
                     app.logger.info(f"Order: {order_id} completed")
-                elif order_responses[order_id][0] == False:
+                elif not order_responses[order_id][0]:
                     producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
                     
             elif message.key == "stock_subtraction_failed":
                 app.logger.info(f"Before: Stock subtraction failed for order: {order_responses}")
                 order_responses[order_id][0] = False
                 app.logger.info(f"After: Stock subtraction failed for order: {order_responses}")
-                if order_responses[order_id][1] == True:
+                if order_responses[order_id][1]:
                     producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
                     
             elif message.key == "payment_failed":
                 app.logger.info(f"Before: Payment failed for order: {order_responses}")
                 order_responses[order_id][1] = False
                 app.logger.info(f"After: Payment failed for order: {order_responses}")
-                if order_responses[order_id][0] == True:
+                if order_responses[order_id][0]:
                     producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
 
 def start_order_consumer():
