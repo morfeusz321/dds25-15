@@ -78,6 +78,9 @@ def create_user():
     value = msgpack.encode(UserValue(credit=0))
     try:
         db.set(key, value)
+        db.hset(f"user:{key}", mapping={
+            "credit": 0,
+        })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({'user_id': key})
@@ -114,6 +117,9 @@ def add_credit(user_id: str, amount: int):
     user_entry.credit += int(amount)
     try:
         db.set(user_id, msgpack.encode(user_entry))
+        db.hset(f"user:{user_id}", mapping={
+            "credit": user_entry.credit,
+        })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
@@ -129,6 +135,9 @@ def remove_credit(user_id: str, amount: int):
         abort(400, f"User: {user_id} credit cannot get reduced below zero!")
     try:
         db.set(user_id, msgpack.encode(user_entry))
+        db.hset(f"user:{user_id}", mapping={
+            "credit": user_entry.credit,
+        })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)

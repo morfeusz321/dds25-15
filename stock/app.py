@@ -77,6 +77,10 @@ def create_item(price: int):
     value = msgpack.encode(StockValue(stock=0, price=int(price)))
     try:
         db.set(key, value)
+        db.hset(f"item:{key}", mapping={
+            "stock": 0,
+            "price": price
+        })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({'item_id': key})
@@ -114,6 +118,9 @@ def add_stock(item_id: str, amount: int):
     item_entry.stock += int(amount)
     try:
         db.set(item_id, msgpack.encode(item_entry))
+        db.hset(f"item:{item_id}", mapping={
+            "stock": item_entry.stock,
+        })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
@@ -129,6 +136,9 @@ def remove_stock(item_id: str, amount: int):
         abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
     try:
         db.set(item_id, msgpack.encode(item_entry))
+        db.hset(f"item:{item_id}", mapping={
+            "stock": item_entry.stock,
+        })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
