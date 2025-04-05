@@ -9,11 +9,11 @@ def init_checkout_state(db, order_id: str):
         # get the state of the order
         state = get_check_state(db, order_id)
 
-        if state["stock_subtracted"] ==  -1 or state["payment_made"] == -1:
-            return "Order already in progress"
+        if state["stock_subtracted"] == -1 or state["payment_made"] == -1:
+            return f"Order already in progress"
 
         if state["stock_subtracted"] == 1 and state["payment_made"] == 1:
-            return "Order already completed"
+            return f"Order already completed"
         
     
     db.hset(f"checkout_state:{order_id}", mapping={

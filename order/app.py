@@ -195,6 +195,11 @@ def checkout(order_id: str):
     if order_entry.paid:
         abort(400, f"Order: {order_id} has already been paid!")
 
+        # try to initialize the order state
+
+    msg = init_checkout_state(db, order_id)
+    print(msg)
+
     #send payment event with the amount to payment service
     producer.send(
         PAYMENT_TOPIC,
@@ -222,11 +227,7 @@ def process_order_event(message):
     # print thread name
     order_id, order = message.value
 
-    # try to initialize the order state
-    
-    msg = init_checkout_state(db, order_id)
-    
-    print(msg)
+
 
     if message.key == "stock_subtracted":
         update_checkout_statedb(db, order_id, "stock_subtracted", 1)
@@ -284,6 +285,10 @@ def start_order_consumer():
         try:
             # print("NUMBER OF ACTIVE THREADS ", threading.active_count())
             process_order_event(message)
+            print("NUMBER OF ACTIVE THREADS ", threading.active_count())
+            # print debugging stuff
+            print(f"Message: {message.key} - {message.value}")
+            # consumer.commit()
         except Exception as e:
             app.logger.error(f"Error processing order event: {e.__cause__}")
 
@@ -293,7 +298,7 @@ This will start the consumer in a separate thread so that it does not block the 
 """
 
 # threading.Thread(target=start_order_consumer, daemon=True, ).start()
-# start_order_consumer() with one single thread
+#start_order_consumer()  with one single thread
 t1 = threading.Thread(target=start_order_consumer)
 
 t1.start()

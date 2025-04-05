@@ -6,7 +6,7 @@ import uuid
 
 import redis
 from kafka import KafkaProducer, KafkaConsumer
-
+from update_payment_utils import add_credits_with_lock, subtract_credits_with_lock
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 
@@ -111,47 +111,47 @@ def find_user(user_id: str):
 
 
 @app.post('/add_funds/<user_id>/<amount>')
-def add_credit(user_id: str, amount: int):
-    user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
-    user_entry.credit += int(amount)
-    try:
-        db.set(user_id, msgpack.encode(user_entry))
-        db.hset(f"user:{user_id}", mapping={
-            "credit": user_entry.credit,
-        })
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
-
+async def add_credit(user_id: str, amount: int):
+    # user_entry: UserValue = get_user_from_db(user_id)
+    # # update credit, serialize and update database
+    # user_entry.credit += int(amount)
+    # try:
+    #     db.set(user_id, msgpack.encode(user_entry))
+    #     db.hset(f"user:{user_id}", mapping={
+    #         "credit": user_entry.credit,
+    #     })
+    # except redis.exceptions.RedisError:
+    #     return abort(400, DB_ERROR_STR)
+    # return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+    await add_credits_with_lock(user_id, amount)
 
 @app.post('/pay/<user_id>/<amount>')
-def remove_credit(user_id: str, amount: int):
-    app.logger.debug(f"Removing {amount} credit from user: {user_id}")
-    user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
-    user_entry.credit -= int(amount)
-    if user_entry.credit < 0:
-        abort(400, f"User: {user_id} credit cannot get reduced below zero!")
-    try:
-        db.set(user_id, msgpack.encode(user_entry))
-        db.hset(f"user:{user_id}", mapping={
-            "credit": user_entry.credit,
-        })
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
-
+async def remove_credit(user_id: str, amount: int):
+    # app.logger.debug(f"Removing {amount} credit from user: {user_id}")
+    # user_entry: UserValue = get_user_from_db(user_id)
+    # # update credit, serialize and update database
+    # user_entry.credit -= int(amount)
+    # if user_entry.credit < 0:
+    #     abort(400, f"User: {user_id} credit cannot get reduced below zero!")
+    # try:
+    #     db.set(user_id, msgpack.encode(user_entry))
+    #     db.hset(f"user:{user_id}", mapping={
+    #         "credit": user_entry.credit,
+    #     })
+    # except redis.exceptions.RedisError:
+    #     return abort(400, DB_ERROR_STR)
+    # return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+    await subtract_credits_with_lock(user_id, amount)
 
 """
 Here we process the payment event and send the payment status to the order service.
 """
-def process_payment_event(message):
+async def process_payment_event(message):
     order_id, order = message.value
 
     if message.key == "make_payment":
         try:
-            remove_credit(order.user_id, order.total_cost)
+            await remove_credit(order.user_id, order.total_cost)
         except Exception as e:
             print(f"Error removing credit: {e}")
             producer.send(ORDER_TOPIC, key="payment_failed", value=(order_id, order))

@@ -7,6 +7,7 @@ import pickle
 import redis
 from kafka import KafkaProducer, KafkaConsumer
 from kafka.errors import KafkaError
+from update_stock_utils import subtract_stock_with_lock, add_stock_with_lock
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
@@ -112,36 +113,39 @@ def find_item(item_id: str):
 
 
 @app.post('/add/<item_id>/<amount>')
-def add_stock(item_id: str, amount: int):
-    item_entry: StockValue = get_item_from_db(item_id)
-    # update stock, serialize and update database
-    item_entry.stock += int(amount)
-    try:
-        db.set(item_id, msgpack.encode(item_entry))
-        db.hset(f"item:{item_id}", mapping={
-            "stock": item_entry.stock,
-        })
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+async def add_stock(item_id: str, amount: int):
+    # item_entry: StockValue = get_item_from_db(item_id)
+    # # update stock, serialize and update database
+    # item_entry.stock += int(amount)
+    # try:
+    #     db.set(item_id, msgpack.encode(item_entry))
+    #     db.hset(f"item:{item_id}", mapping={
+    #         "stock": item_entry.stock,
+    #     })
+    # except redis.exceptions.RedisError:
+    #     return abort(400, DB_ERROR_STR)
+    # return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+    await add_stock_with_lock(item_id, amount)
+
 
 
 @app.post('/subtract/<item_id>/<amount>')
-def remove_stock(item_id: str, amount: int):
-    item_entry: StockValue = get_item_from_db(item_id)
-    # update stock, serialize and update database
-    item_entry.stock -= int(amount)
-    print(f"Item: {item_id} stock updated to: {item_entry.stock}")
-    if item_entry.stock < 0:
-        abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
-    try:
-        db.set(item_id, msgpack.encode(item_entry))
-        db.hset(f"item:{item_id}", mapping={
-            "stock": item_entry.stock,
-        })
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+async def remove_stock(item_id: str, amount: int):
+    # item_entry: StockValue = get_item_from_db(item_id)
+    # # update stock, serialize and update database
+    # item_entry.stock -= int(amount)
+    # print(f"Item: {item_id} count after subtraction: {item_entry.stock}")
+    # if item_entry.stock < 0:
+    #     abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
+    # try:
+    #     db.set(item_id, msgpack.encode(item_entry))
+    #     db.hset(f"item:{item_id}", mapping={
+    #         "stock": item_entry.stock,
+    #     })
+    # except redis.exceptions.RedisError:
+    #     return abort(400, DB_ERROR_STR)
+    # return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+    await subtract_stock_with_lock(item_id, amount)
 
 
 def process_stock_event(message):
