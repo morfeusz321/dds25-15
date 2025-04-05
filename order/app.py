@@ -4,35 +4,44 @@ import atexit
 import random
 import uuid
 import pickle
-
+import threading
 import redis
 import requests
-from kafka import KafkaProducer, KafkaConsumer
 
+from kafka import KafkaProducer, KafkaConsumer
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+from order_state_manipultion import *
 
-import threading
-from collections import defaultdict
+
+
+
+'''intial setup'''
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
-
 GATEWAY_URL = os.environ['GATEWAY_URL']
-
-
 app = Flask("order-service")
 
 # temporary hashmap to keep track of order responses cannot be used if we want crash tolerance for order service, 
 # or if order is going to have multiple instances
 # indemopotency key 
-order_responses = {}
-order_locks = defaultdict(threading.Lock)
 
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
+
+# Create a table in redis to keep track of the state of checkout orders
+# 3 columns order_id, stock_subtracted, payment_made
+# order_id is the key, stock_subtracted and payment_made are ints -1, 0, 1
+# -1 means no message was received, 0 means failure, 1 means success
+
+# add table to redis
+
+#TODO code here
+
+
 
 """
 Setup Kafka producer
@@ -181,12 +190,6 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
 
-    # None means no message was received, True means success, False means failure
-    # [stock_subtracted, payment_made]
-    order_responses[order_id] = [None, None] 
-    # TODO add some sort of lock to read at all time write only one 
-    
-    app.logger.info(f"Checkout started for order: {order_responses}")
     order_entry: OrderValue = get_order_from_db(order_id)
 
     if order_entry.paid:
@@ -215,50 +218,56 @@ If the order is not paid but the stock has been subtracted, it will rollback the
 and more.
 """
 
-process_order_lock = threading.Lock()
-
 def process_order_event(message):
     # print thread name
-    with process_order_lock:
-        print("this thread is touching me: ", threading.current_thread().name)
+    order_id, order = message.value
 
-        order_id, order = message.value
-        with order_locks[order_id]:
-            if message.key == "stock_subtracted":
-                app.logger.info(f"Before: Stock subtracted for order: {order_responses}")
-                order_responses[order_id][0] = True
-                app.logger.info(f"After: Stock subtracted for order: {order_responses}")
-                if order_responses[order_id][1] == True:
-                    order.paid = True
-                    db.set(order_id, msgpack.encode(order))
-                    app.logger.info(f"Order: {order_id} completed")
-                elif order_responses[order_id][1] == False:
-                    producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
-                    
-            elif message.key == "payment_made":
-                app.logger.info(f"Before: Payment made for order: {order_responses}")
-                order_responses[order_id][1] = True
-                app.logger.info(f"After: Payment made for order: {order_responses}")
-                if order_responses[order_id][0] == True:
-                    order.paid = True
-                    db.set(order_id, msgpack.encode(order))
-                    app.logger.info(f"Order: {order_id} completed")
-                elif order_responses[order_id][0] == False:
-                    producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
-                    
-            elif message.key == "stock_subtraction_failed":
-                app.logger.info(f"Before: Stock subtraction failed for order: {order_responses}")
-                order_responses[order_id][0] = False
-                app.logger.info(f"After: Stock subtraction failed for order: {order_responses}")
-                if order_responses[order_id][1] == True:
-                    producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
-                    
-            elif message.key == "payment_failed":
-                app.logger.info(f"Before: Payment failed for order: {order_responses}")
-                order_responses[order_id][1] = False
-                app.logger.info(f"After: Payment failed for order: {order_responses}")
-                if order_responses[order_id][0] == True:
-                    producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+    # try to initialize the order state
+    
+    msg = init_checkout_state(db, order_id)
+    
+    print(msg)
+
+    if message.key == "stock_subtracted":
+        update_checkout_statedb(db, order_id, "stock_subtracted", 1)
+        print("Stock subtracted and state " + str(get_check_state(db, order_id)))
+        if get_check_state(db, order_id)["payment_made"] == 1:
+            print("Payment made")
+            order.paid = True
+            db.set(order_id, msgpack.encode(order))
+            print(f"Order: {order_id} completed")
+        elif get_check_state(db, order_id)["payment_made"] == 0:
+            print("Payment not made rolling back stock")
+            producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+
+
+
+    elif message.key == "payment_made":
+        update_checkout_statedb(db, order_id, "payment_made", 1)
+        print("Payment made and state " + str(get_check_state(db, order_id)))
+
+        if get_check_state(db, order_id)["stock_subtracted"] == 1:
+            order.paid = True
+            db.set(order_id, msgpack.encode(order))
+            print(f"Order: {order_id} completed")
+        elif get_check_state(db, order_id)["stock_subtracted"] == 0:
+            print("Stock not subtracted rolling back payment")
+            producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+
+
+
+    elif message.key == "stock_subtraction_failed":
+        update_checkout_statedb(db, order_id, "stock_subtracted", 0)
+        print("Stock subtraction failed")
+        if get_check_state(db, order_id)["payment_made"] == 1:
+            producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+    elif message.key == "payment_failed":
+        update_checkout_statedb(db, order_id, "payment_made", 0)
+        print("Payment failed")
+        if get_check_state(db, order_id)["stock_subtracted"] == 1:
+            producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+
+            
 
 def start_order_consumer():
     consumer = KafkaConsumer(
