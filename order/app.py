@@ -219,15 +219,13 @@ and more.
 """
 
 def process_order_event(message):
-    # print thread name
     order_id, order = message.value
 
-    # try to initialize the order state
-    
+    #initialize the order state
     msg = init_checkout_state(db, order_id)
     
-    print(msg)
-
+    app.logger.info(msg)
+    
     if message.key == "stock_subtracted":
         update_checkout_statedb(db, order_id, "stock_subtracted", 1)
         print("Stock subtracted and state " + str(get_check_state(db, order_id)))
@@ -237,10 +235,11 @@ def process_order_event(message):
             db.set(order_id, msgpack.encode(order))
             print(f"Order: {order_id} completed")
         elif get_check_state(db, order_id)["payment_made"] == 0:
-            print("Payment not made rolling back stock")
-            producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
-
-
+            if get_check_state(db, order_id)["retries"] < 3:
+                producer.send(PAYMENT_TOPIC, key="make_payment", value=(order_id, order))
+            else:
+                print("Payment not made rolling back stock")
+                producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
 
     elif message.key == "payment_made":
         update_checkout_statedb(db, order_id, "payment_made", 1)
@@ -251,21 +250,29 @@ def process_order_event(message):
             db.set(order_id, msgpack.encode(order))
             print(f"Order: {order_id} completed")
         elif get_check_state(db, order_id)["stock_subtracted"] == 0:
-            print("Stock not subtracted rolling back payment")
-            producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
-
-
+            if get_check_state(db, order_id)["retries"] < 3:
+                producer.send(STOCK_TOPIC, key="subtract_stock", value=(order_id, order))
+            else:
+                print("Stock not subtracted rolling back payment")
+                producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
 
     elif message.key == "stock_subtraction_failed":
         update_checkout_statedb(db, order_id, "stock_subtracted", 0)
         print("Stock subtraction failed")
         if get_check_state(db, order_id)["payment_made"] == 1:
-            producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+            if get_check_state(db, order_id)["retries"] < 3:
+                producer.send(STOCK_TOPIC, key="subtract_stock", value=(order_id, order))
+            else:
+                producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+
     elif message.key == "payment_failed":
         update_checkout_statedb(db, order_id, "payment_made", 0)
         print("Payment failed")
         if get_check_state(db, order_id)["stock_subtracted"] == 1:
-            producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
+            if get_check_state(db, order_id)["retries"] < 3:
+                producer.send(PAYMENT_TOPIC, key="make_payment", value=(order_id, order))
+            else:
+                producer.send(STOCK_TOPIC, key="rollback_stock", value=(order_id, order))
 
             
 
