@@ -9,6 +9,16 @@ from kafka import KafkaProducer, KafkaConsumer
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+from time import sleep
+
+def wait_until_redis_alive(db, poll_interval=1):
+    while True:
+        print("Waiting for Redis to be alive...")
+        try:
+            db.ping()
+            break
+        except redis.exceptions.RedisError:
+            sleep(poll_interval)
 
 DB_ERROR_STR = "DB error"
 
@@ -109,9 +119,11 @@ def find_user(user_id: str):
         }
     )
 
-
 @app.post('/add_funds/<user_id>/<amount>')
 def add_credit(user_id: str, amount: int):
+
+    wait_until_redis_alive(db)
+
     user_entry: UserValue = get_user_from_db(user_id)
     # update credit, serialize and update database
     user_entry.credit += int(amount)
@@ -128,6 +140,9 @@ def add_credit(user_id: str, amount: int):
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit(user_id: str, amount: int):
     app.logger.debug(f"Removing {amount} credit from user: {user_id}")
+
+    wait_until_redis_alive(db)
+
     user_entry: UserValue = get_user_from_db(user_id)
     # update credit, serialize and update database
     user_entry.credit -= int(amount)

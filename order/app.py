@@ -12,8 +12,16 @@ from kafka import KafkaProducer, KafkaConsumer
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 from order_state_manipultion import *
+from time import sleep
 
-
+def wait_until_redis_alive(db, poll_interval=1):
+    while True:
+        print("Waiting for Redis to be alive...")
+        try:
+            db.ping()
+            break
+        except redis.exceptions.RedisError:
+            sleep(poll_interval)
 
 
 '''intial setup'''
@@ -189,6 +197,8 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
+
+    wait_until_redis_alive(db)
 
     order_entry: OrderValue = get_order_from_db(order_id)
 

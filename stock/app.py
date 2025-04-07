@@ -7,9 +7,21 @@ import pickle
 import redis
 from kafka import KafkaProducer, KafkaConsumer
 from kafka.errors import KafkaError
+from time import sleep
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+
+
+def wait_until_redis_alive(db, poll_interval=1):
+    while True:
+        print("Waiting for Redis to be alive...")
+        try:
+            db.ping()
+            break
+        except redis.exceptions.RedisError:
+            sleep(poll_interval)
+
 
 
 DB_ERROR_STR = "DB error"
@@ -113,6 +125,9 @@ def find_item(item_id: str):
 
 @app.post('/add/<item_id>/<amount>')
 def add_stock(item_id: str, amount: int):
+
+    wait_until_redis_alive(db)
+
     item_entry: StockValue = get_item_from_db(item_id)
     # update stock, serialize and update database
     item_entry.stock += int(amount)
@@ -128,6 +143,9 @@ def add_stock(item_id: str, amount: int):
 
 @app.post('/subtract/<item_id>/<amount>')
 def remove_stock(item_id: str, amount: int):
+
+    wait_until_redis_alive(db)
+
     item_entry: StockValue = get_item_from_db(item_id)
     # update stock, serialize and update database
     item_entry.stock -= int(amount)
