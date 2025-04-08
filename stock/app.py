@@ -175,18 +175,14 @@ def remove_stock_kafka(item_id: str, amount: int, order_id: str):
         current_order_id = db.get(order_id)
         if current_order_id is None:
             with db.pipeline() as pipe:
-                while True:
-                    try:
-                        pipe.watch(item_id, order_id)
-                        pipe.multi()
-                        pipe.set(item_id, msgpack.encode(item_entry))
-                        pipe.hset(f"item:{item_id}", mapping={
-                            "stock": item_entry.stock,
-                        })
-                        pipe.set(order_id, msgpack.encode(StockValueOrderId(credit=order_id)))
-                        pipe.execute()
-                    except redis.WatchError:
-                        continue
+                pipe.watch(item_id, order_id)
+                pipe.multi()
+                pipe.set(item_id, msgpack.encode(item_entry))
+                pipe.hset(f"item:{item_id}", mapping={
+                    "stock": item_entry.stock,
+                })
+                pipe.set(order_id, msgpack.encode(StockValueOrderId(order_id=order_id)))
+                pipe.execute()
         else:
             return abort(400, f"Remove stock for order: {order_id} already done!")
     except redis.exceptions.RedisError:

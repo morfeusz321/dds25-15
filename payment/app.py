@@ -176,18 +176,14 @@ def remove_credit_kafka(user_id: str, amount: int, order_id: str):
         current_order_id = db.get(order_id)
         if current_order_id is None:
             with db.pipeline() as pipe:
-                while True:
-                    try:
-                        pipe.watch(user_id, order_id)
-                        pipe.multi()
-                        pipe.set(user_id, msgpack.encode(user_entry))
-                        pipe.hset(f"user:{user_id}", mapping={
-                            "credit": user_entry.credit,
-                        })
-                        pipe.set(order_id, msgpack.encode(UserValueOrderId(credit=order_id)))
-                        pipe.execute()
-                    except redis.WatchError:
-                        continue
+                pipe.watch(user_id, order_id)
+                pipe.multi()
+                pipe.set(user_id, msgpack.encode(user_entry))
+                pipe.hset(f"user:{user_id}", mapping={
+                    "credit": user_entry.credit,
+                })
+                pipe.set(order_id, msgpack.encode(UserValueOrderId(order_id=order_id)))
+                pipe.execute()
         else:
             return abort(400, f"Remove credit for order: {order_id} already done!")
     except redis.exceptions.RedisError:
