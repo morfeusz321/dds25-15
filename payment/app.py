@@ -11,14 +11,15 @@ from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 from time import sleep
 
-def wait_until_redis_alive(db, poll_interval=1):
-    while True:
-        print("Waiting for Redis to be alive...")
-        try:
-            db.ping()
-            break
-        except redis.exceptions.RedisError:
-            sleep(poll_interval)
+def with_redis_alive(func):
+    def wrapper(*args, **kwargs):
+        while True:
+            try:
+                return func(*args, **kwargs)
+            except redis.exceptions.RedisError as e:
+                print(f"Redis unavailable, retrying... ({e})")
+                sleep(1)
+    return wrapper
 
 DB_ERROR_STR = "DB error"
 
@@ -68,6 +69,7 @@ class OrderValue(Struct):
     total_cost: int
 
 
+@with_redis_alive
 def get_user_from_db(user_id: str) -> UserValue | None:
     try:
         # get serialized data
@@ -82,6 +84,7 @@ def get_user_from_db(user_id: str) -> UserValue | None:
     return entry
 
 
+@with_redis_alive
 @app.post('/create_user')
 def create_user():
     key = str(uuid.uuid4())
@@ -96,6 +99,7 @@ def create_user():
     return jsonify({'user_id': key})
 
 
+@with_redis_alive
 @app.post('/batch_init/<n>/<starting_money>')
 def batch_init_users(n: int, starting_money: int):
     n = int(n)
@@ -109,6 +113,7 @@ def batch_init_users(n: int, starting_money: int):
     return jsonify({"msg": "Batch init for users successful"})
 
 
+@with_redis_alive
 @app.get('/find_user/<user_id>')
 def find_user(user_id: str):
     user_entry: UserValue = get_user_from_db(user_id)
@@ -119,11 +124,10 @@ def find_user(user_id: str):
         }
     )
 
+
+@with_redis_alive
 @app.post('/add_funds/<user_id>/<amount>')
 def add_credit(user_id: str, amount: int):
-
-    wait_until_redis_alive(db)
-
     user_entry: UserValue = get_user_from_db(user_id)
     # update credit, serialize and update database
     user_entry.credit += int(amount)
@@ -137,11 +141,10 @@ def add_credit(user_id: str, amount: int):
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
 
+@with_redis_alive
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit(user_id: str, amount: int):
     app.logger.debug(f"Removing {amount} credit from user: {user_id}")
-
-    wait_until_redis_alive(db)
 
     user_entry: UserValue = get_user_from_db(user_id)
     # update credit, serialize and update database

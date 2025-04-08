@@ -13,14 +13,15 @@ from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 
 
-def wait_until_redis_alive(db, poll_interval=1):
-    while True:
-        print("Waiting for Redis to be alive...")
-        try:
-            db.ping()
-            break
-        except redis.exceptions.RedisError:
-            sleep(poll_interval)
+def with_redis_alive(func):
+    def wrapper(*args, **kwargs):
+        while True:
+            try:
+                return func(*args, **kwargs)
+            except redis.exceptions.RedisError as e:
+                print(f"Redis unavailable, retrying... ({e})")
+                sleep(1)
+    return wrapper
 
 
 
@@ -67,7 +68,7 @@ class OrderValue(Struct):
     user_id: str
     total_cost: int
 
-
+@with_redis_alive
 def get_item_from_db(item_id: str) -> StockValue | None:
     # get serialized data
     try:
@@ -82,6 +83,7 @@ def get_item_from_db(item_id: str) -> StockValue | None:
     return entry
 
 
+@with_redis_alive
 @app.post('/item/create/<price>')
 def create_item(price: int):
     key = str(uuid.uuid4())
@@ -98,6 +100,7 @@ def create_item(price: int):
     return jsonify({'item_id': key})
 
 
+@with_redis_alive
 @app.post('/batch_init/<n>/<starting_stock>/<item_price>')
 def batch_init_users(n: int, starting_stock: int, item_price: int):
     n = int(n)
@@ -122,12 +125,9 @@ def find_item(item_id: str):
         }
     )
 
-
+@with_redis_alive
 @app.post('/add/<item_id>/<amount>')
 def add_stock(item_id: str, amount: int):
-
-    wait_until_redis_alive(db)
-
     item_entry: StockValue = get_item_from_db(item_id)
     # update stock, serialize and update database
     item_entry.stock += int(amount)
@@ -141,11 +141,9 @@ def add_stock(item_id: str, amount: int):
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
+@with_redis_alive
 @app.post('/subtract/<item_id>/<amount>')
 def remove_stock(item_id: str, amount: int):
-
-    wait_until_redis_alive(db)
-
     item_entry: StockValue = get_item_from_db(item_id)
     # update stock, serialize and update database
     item_entry.stock -= int(amount)

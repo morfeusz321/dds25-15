@@ -14,14 +14,15 @@ from flask import Flask, jsonify, abort, Response
 from order_state_manipultion import *
 from time import sleep
 
-def wait_until_redis_alive(db, poll_interval=1):
-    while True:
-        print("Waiting for Redis to be alive...")
-        try:
-            db.ping()
-            break
-        except redis.exceptions.RedisError:
-            sleep(poll_interval)
+def with_redis_alive(func):
+    def wrapper(*args, **kwargs):
+        while True:
+            try:
+                return func(*args, **kwargs)
+            except redis.exceptions.RedisError as e:
+                print(f"Redis unavailable, retrying... ({e})")
+                sleep(1)
+    return wrapper
 
 
 '''intial setup'''
@@ -83,6 +84,7 @@ class OrderValue(Struct):
     total_cost: int
 
 
+@with_redis_alive
 def get_order_from_db(order_id: str) -> OrderValue | None:
     try:
         # get serialized data
@@ -97,6 +99,7 @@ def get_order_from_db(order_id: str) -> OrderValue | None:
     return entry
 
 
+@with_redis_alive
 @app.post('/create/<user_id>')
 def create_order(user_id: str):
     key = str(uuid.uuid4())
@@ -108,6 +111,7 @@ def create_order(user_id: str):
     return jsonify({'order_id': key})
 
 
+@with_redis_alive
 @app.post('/batch_init/<n>/<n_items>/<n_users>/<item_price>')
 def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
 
@@ -167,6 +171,7 @@ def send_get_request(url: str):
         return response
 
 
+@with_redis_alive
 @app.post('/addItem/<order_id>/<item_id>/<quantity>')
 def add_item(order_id: str, item_id: str, quantity: int):
     """
@@ -197,9 +202,6 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
-
-    wait_until_redis_alive(db)
-
     order_entry: OrderValue = get_order_from_db(order_id)
 
     if order_entry.paid:
@@ -227,7 +229,7 @@ This function will check if the order is paid and there is enough stock to fulfi
 If the order is not paid but the stock has been subtracted, it will rollback the stock.
 and more.
 """
-
+@with_redis_alive
 def process_order_event(message):
     # print thread name
     order_id, order = message.value
