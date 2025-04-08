@@ -189,6 +189,7 @@ def start_payment_consumer():
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         group_id='payment-group',
         auto_offset_reset='earliest',
+        enable_auto_commit=False,
         key_deserializer=lambda k: pickle.loads(k),
         value_deserializer=lambda v: pickle.loads(v)
     )
@@ -196,6 +197,7 @@ def start_payment_consumer():
     for message in consumer:
         try:
             process_payment_event(message)
+            consumer.commit()
         except Exception as e:
             app.logger.error(f"Error processing payment event: {e.__cause__}")
 

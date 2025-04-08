@@ -285,6 +285,7 @@ def start_order_consumer():
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         key_deserializer=lambda k: pickle.loads(k),
         value_deserializer=lambda v: pickle.loads(v),
+        enable_auto_commit=False,
         group_id='order-group',
         auto_offset_reset='earliest'
     )
@@ -294,6 +295,7 @@ def start_order_consumer():
         try:
             # print("NUMBER OF ACTIVE THREADS ", threading.active_count())
             process_order_event(message)
+            consumer.commit()
         except Exception as e:
             app.logger.error(f"Error processing order event: {e.__cause__}")
 

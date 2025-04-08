@@ -191,6 +191,7 @@ def start_stock_consumer():
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         group_id='stock-group',
         auto_offset_reset='earliest',
+        enable_auto_commit=False,
         key_deserializer=lambda k: pickle.loads(k),
         value_deserializer=lambda v: pickle.loads(v)
     )
@@ -198,6 +199,7 @@ def start_stock_consumer():
     for message in consumer:
         try:
             process_stock_event(message)
+            consumer.commit()
         except Exception as e:
             app.logger.error(f"Error processing stock event: {e.__cause__}")
 
