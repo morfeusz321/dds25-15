@@ -62,6 +62,9 @@ atexit.register(close_db_connection)
 class UserValue(Struct):
     credit: int
 
+class UserValueOrderId(Struct):
+    order_id: str
+
 class OrderValue(Struct):
     paid: bool
     items: list[tuple[str, int]]
@@ -161,6 +164,37 @@ def remove_credit(user_id: str, amount: int):
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
 
+@with_redis_alive
+def remove_credit_kafka(user_id: str, amount: int, order_id: str):
+    app.logger.debug(f"Removing {amount} credit from user: {user_id}")
+
+    user_entry: UserValue = get_user_from_db(user_id)
+    user_entry.credit -= int(amount)
+    if user_entry.credit < 0:
+        abort(400, f"User: {user_id} credit cannot get reduced below zero!")
+    try:
+        current_order_id = db.get(order_id)
+        if current_order_id is None:
+            with db.pipeline() as pipe:
+                while True:
+                    try:
+                        pipe.watch(user_id, order_id)
+                        pipe.multi()
+                        pipe.set(user_id, msgpack.encode(user_entry))
+                        pipe.hset(f"user:{user_id}", mapping={
+                            "credit": user_entry.credit,
+                        })
+                        pipe.set(order_id, msgpack.encode(UserValueOrderId(credit=order_id)))
+                        pipe.execute()
+                    except redis.WatchError:
+                        continue
+        else:
+            return abort(400, f"Remove credit for order: {order_id} already done!")
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+
+
 """
 Here we process the payment event and send the payment status to the order service.
 """
@@ -169,7 +203,7 @@ def process_payment_event(message):
 
     if message.key == "make_payment":
         try:
-            remove_credit(order.user_id, order.total_cost)
+            remove_credit_kafka(order.user_id, order.total_cost, order_id)
         except Exception as e:
             print(f"Error removing credit: {e}")
             producer.send(ORDER_TOPIC, key="payment_failed", value=(order_id, order))

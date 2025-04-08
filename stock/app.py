@@ -62,6 +62,9 @@ class StockValue(Struct):
     stock: int
     price: int
 
+class StockValueOrderId(Struct):
+    order_id: str
+
 class OrderValue(Struct):
     paid: bool
     items: list[tuple[str, int]]
@@ -160,6 +163,37 @@ def remove_stock(item_id: str, amount: int):
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
+@with_redis_alive
+def remove_stock_kafka(item_id: str, amount: int, order_id: str):
+    item_entry: StockValue = get_item_from_db(item_id)
+    # update stock, serialize and update database
+    item_entry.stock -= int(amount)
+    print(f"Item: {item_id} stock updated to: {item_entry.stock}")
+    if item_entry.stock < 0:
+        abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
+    try:
+        current_order_id = db.get(order_id)
+        if current_order_id is None:
+            with db.pipeline() as pipe:
+                while True:
+                    try:
+                        pipe.watch(item_id, order_id)
+                        pipe.multi()
+                        pipe.set(item_id, msgpack.encode(item_entry))
+                        pipe.hset(f"item:{item_id}", mapping={
+                            "stock": item_entry.stock,
+                        })
+                        pipe.set(order_id, msgpack.encode(StockValueOrderId(credit=order_id)))
+                        pipe.execute()
+                    except redis.WatchError:
+                        continue
+        else:
+            return abort(400, f"Remove stock for order: {order_id} already done!")
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+
+
 def process_stock_event(message):
     order_id, order = message.value
 
@@ -167,7 +201,7 @@ def process_stock_event(message):
         try:
             for item_id, amount in order.items:
                 #TODO: make sure that if some get removed but not all then rollback locally
-                remove_stock(item_id, amount)
+                remove_stock_kafka(item_id, amount, order_id)
         except Exception as e:
             producer.send(ORDER_TOPIC, key="stock_subtraction_failed", value=(order_id, order))
             return abort(400, f"Error subtracting stock: {e}")
