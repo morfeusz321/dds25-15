@@ -16,7 +16,6 @@ from time import sleep
 
 def wait_until_redis_alive(db, poll_interval=1):
     while True:
-        print("Waiting for Redis to be alive...")
         try:
             db.ping()
             break
@@ -85,51 +84,62 @@ class OrderValue(Struct):
 
 def get_order_from_db(order_id: str) -> OrderValue | None:
     try:
-        # get serialized data
-        entry: bytes = db.get(order_id)
+        # Get all fields of the hash
+        entry = db.hgetall(order_id)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    # deserialize data if it exists else return null
-    entry: OrderValue | None = msgpack.decode(entry, type=OrderValue) if entry else None
-    if entry is None:
-        # if order does not exist in the database; abort
+    
+    if not entry:
+        # If order does not exist in the database; abort
         abort(400, f"Order: {order_id} not found!")
-    return entry
+    
+    # Deserialize the hash fields
+    return OrderValue(
+        paid=bool(int(entry[b'paid'])),
+        items=pickle.loads(entry[b'items']),
+        user_id=entry[b'user_id'].decode(),
+        total_cost=int(entry[b'total_cost'])
+    )
 
 
 @app.post('/create/<user_id>')
 def create_order(user_id: str):
-    key = str(uuid.uuid4())
-    value = msgpack.encode(OrderValue(paid=False, items=[], user_id=user_id, total_cost=0))
+    order_id = str(uuid.uuid4())
+    order_data = {
+        "paid": 0,
+        "items": pickle.dumps([]),
+        "user_id": user_id,
+        "total_cost": 0
+    }
     try:
-        db.set(key, value)
+        db.hset(order_id, mapping=order_data)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    return jsonify({'order_id': key})
+    return jsonify({'order_id': order_id})
 
 
 @app.post('/batch_init/<n>/<n_items>/<n_users>/<item_price>')
 def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
-
     n = int(n)
     n_items = int(n_items)
     n_users = int(n_users)
     item_price = int(item_price)
 
-    def generate_entry() -> OrderValue:
+    def generate_entry() -> dict:
         user_id = random.randint(0, n_users - 1)
         item1_id = random.randint(0, n_items - 1)
         item2_id = random.randint(0, n_items - 1)
-        value = OrderValue(paid=False,
-                           items=[(f"{item1_id}", 1), (f"{item2_id}", 1)],
-                           user_id=f"{user_id}",
-                           total_cost=2*item_price)
-        return value
+        return {
+            "paid": 0,
+            "items": pickle.dumps([(f"{item1_id}", 1), (f"{item2_id}", 1)]),
+            "user_id": f"{user_id}",
+            "total_cost": 2 * item_price
+        }
 
-    kv_pairs: dict[str, bytes] = {f"{i}": msgpack.encode(generate_entry())
-                                  for i in range(n)}
     try:
-        db.mset(kv_pairs)
+        for i in range(n):
+            db.hset(f"order:{i}", mapping=generate_entry())
+
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({"msg": "Batch init for orders successful"})
@@ -179,11 +189,26 @@ def add_item(order_id: str, item_id: str, quantity: int):
         # Request failed because item does not exist
         abort(400, f"Item: {item_id} does not exist!")
     item_json: dict = item_reply.json()
-    #TODO: check if item is already in order and update quantity instead of adding a new item with the same id
-    order_entry.items.append((item_id, int(quantity)))
+
+    # Check if item already exists in the order and update quantity
+    updated = False
+    for i, (existing_item_id, existing_quantity) in enumerate(order_entry.items):
+        if existing_item_id == item_id:
+            order_entry.items[i] = (item_id, existing_quantity + int(quantity))
+            updated = True
+            break
+    if not updated:
+        order_entry.items.append((item_id, int(quantity)))
+
     order_entry.total_cost += int(quantity) * item_json["price"]
+
     try:
-        db.set(order_id, msgpack.encode(order_entry))
+        db.hset(order_id, mapping={
+            "paid": int(order_entry.paid),
+            "items": pickle.dumps(order_entry.items),
+            "user_id": order_entry.user_id,
+            "total_cost": order_entry.total_cost
+        })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"Item: {item_id} added to: {order_id} price updated to: {order_entry.total_cost}",
@@ -197,7 +222,6 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
-
     wait_until_redis_alive(db)
 
     order_entry: OrderValue = get_order_from_db(order_id)
@@ -229,7 +253,6 @@ and more.
 """
 
 def process_order_event(message):
-    # print thread name
     order_id, order = message.value
 
     # try to initialize the order state
@@ -271,6 +294,7 @@ def process_order_event(message):
         print("Stock subtraction failed")
         if get_check_state(db, order_id)["payment_made"] == 1:
             producer.send(PAYMENT_TOPIC, key="rollback_payment", value=(order_id, order))
+
     elif message.key == "payment_failed":
         update_checkout_statedb(db, order_id, "payment_made", 0)
         print("Payment failed")
@@ -290,9 +314,7 @@ def start_order_consumer():
     )
 
     for message in consumer:
-        # print the number of threads
         try:
-            # print("NUMBER OF ACTIVE THREADS ", threading.active_count())
             process_order_event(message)
         except Exception as e:
             app.logger.error(f"Error processing order event: {e.__cause__}")
@@ -302,14 +324,10 @@ def start_order_consumer():
 This will start the consumer in a separate thread so that it does not block the main thread.
 """
 
-# threading.Thread(target=start_order_consumer, daemon=True, ).start()
 # start_order_consumer() with one single thread
 t1 = threading.Thread(target=start_order_consumer)
 
 t1.start()
-
-
-# start_order_consumer()
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

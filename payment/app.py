@@ -13,7 +13,6 @@ from time import sleep
 
 def wait_until_redis_alive(db, poll_interval=1):
     while True:
-        print("Waiting for Redis to be alive...")
         try:
             db.ping()
             break
@@ -70,26 +69,27 @@ class OrderValue(Struct):
 
 def get_user_from_db(user_id: str) -> UserValue | None:
     try:
-        # get serialized data
-        entry: bytes = db.get(user_id)
+        # Retrieve all fields of the hash
+        entry = db.hgetall(f"user:{user_id}")
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    # deserialize data if it exists else return null
-    entry: UserValue | None = msgpack.decode(entry, type=UserValue) if entry else None
-    if entry is None:
-        # if user does not exist in the database; abort
+    
+    if not entry:
+        # If user does not exist in the database; abort
         abort(400, f"User: {user_id} not found!")
-    return entry
+    
+    # Deserialize the hash fields
+    return UserValue(
+        credit=int(entry[b'credit'])
+    )
 
 
 @app.post('/create_user')
 def create_user():
     key = str(uuid.uuid4())
-    value = msgpack.encode(UserValue(credit=0))
     try:
-        db.set(key, value)
         db.hset(f"user:{key}", mapping={
-            "credit": 0,
+            "credit": 0
         })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
@@ -121,16 +121,14 @@ def find_user(user_id: str):
 
 @app.post('/add_funds/<user_id>/<amount>')
 def add_credit(user_id: str, amount: int):
-
     wait_until_redis_alive(db)
 
     user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
     user_entry.credit += int(amount)
+
     try:
-        db.set(user_id, msgpack.encode(user_entry))
         db.hset(f"user:{user_id}", mapping={
-            "credit": user_entry.credit,
+            "credit": user_entry.credit
         })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
@@ -140,18 +138,16 @@ def add_credit(user_id: str, amount: int):
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit(user_id: str, amount: int):
     app.logger.debug(f"Removing {amount} credit from user: {user_id}")
-
     wait_until_redis_alive(db)
 
     user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
     user_entry.credit -= int(amount)
     if user_entry.credit < 0:
         abort(400, f"User: {user_id} credit cannot get reduced below zero!")
+
     try:
-        db.set(user_id, msgpack.encode(user_entry))
         db.hset(f"user:{user_id}", mapping={
-            "credit": user_entry.credit,
+            "credit": user_entry.credit
         })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
@@ -168,7 +164,6 @@ def process_payment_event(message):
         try:
             remove_credit(order.user_id, order.total_cost)
         except Exception as e:
-            print(f"Error removing credit: {e}")
             producer.send(ORDER_TOPIC, key="payment_failed", value=(order_id, order))
             return abort(400, f"Error removing credit: {e}")
         
