@@ -6,7 +6,6 @@ import pickle
 
 import redis
 from kafka import KafkaProducer, KafkaConsumer
-from kafka.errors import KafkaError
 from time import sleep
 
 from msgspec import msgpack, Struct
@@ -73,30 +72,31 @@ class OrderValue(Struct):
 
 @with_redis_alive
 def get_item_from_db(item_id: str) -> StockValue | None:
-    # get serialized data
     try:
-        entry: bytes = db.get(item_id)
+        # Retrieve all fields of the hash
+        entry = db.hgetall(f"item:{item_id}")
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    # deserialize data if it exists else return null
-    entry: StockValue | None = msgpack.decode(entry, type=StockValue) if entry else None
-    if entry is None:
-        # if item does not exist in the database; abort
+    
+    if not entry:
+        # If item does not exist in the database; abort
         abort(400, f"Item: {item_id} not found!")
-    return entry
+    
+    # Deserialize the hash fields into a StockValue object
+    return StockValue(
+        stock=int(entry[b'stock']),
+        price=int(entry[b'price'])
+    )
 
 
 @with_redis_alive
 @app.post('/item/create/<price>')
 def create_item(price: int):
     key = str(uuid.uuid4())
-    print(f"Item: {key} created")
-    value = msgpack.encode(StockValue(stock=0, price=int(price)))
     try:
-        db.set(key, value)
         db.hset(f"item:{key}", mapping={
             "stock": 0,
-            "price": price
+            "price": int(price)
         })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
@@ -109,10 +109,13 @@ def batch_init_users(n: int, starting_stock: int, item_price: int):
     n = int(n)
     starting_stock = int(starting_stock)
     item_price = int(item_price)
-    kv_pairs: dict[str, bytes] = {f"{i}": msgpack.encode(StockValue(stock=starting_stock, price=item_price))
-                                  for i in range(n)}
+
     try:
-        db.mset(kv_pairs)
+        for i in range(n):
+            db.hset(f"item:{i}", mapping={
+                "stock": starting_stock,
+                "price": item_price
+            })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({"msg": "Batch init for stock successful"})
@@ -132,12 +135,12 @@ def find_item(item_id: str):
 @app.post('/add/<item_id>/<amount>')
 def add_stock(item_id: str, amount: int):
     item_entry: StockValue = get_item_from_db(item_id)
-    # update stock, serialize and update database
     item_entry.stock += int(amount)
+
     try:
-        db.set(item_id, msgpack.encode(item_entry))
         db.hset(f"item:{item_id}", mapping={
             "stock": item_entry.stock,
+            "price": item_entry.price
         })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
@@ -148,15 +151,14 @@ def add_stock(item_id: str, amount: int):
 @app.post('/subtract/<item_id>/<amount>')
 def remove_stock(item_id: str, amount: int):
     item_entry: StockValue = get_item_from_db(item_id)
-    # update stock, serialize and update database
     item_entry.stock -= int(amount)
-    print(f"Item: {item_id} stock updated to: {item_entry.stock}")
     if item_entry.stock < 0:
         abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
+
     try:
-        db.set(item_id, msgpack.encode(item_entry))
         db.hset(f"item:{item_id}", mapping={
             "stock": item_entry.stock,
+            "price": item_entry.price
         })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
