@@ -1,5 +1,5 @@
 Daniel: I made the SAGA architecture and implemented that logic in the code (sending the events and when to rollback etc.) + debugging. Also tried to migrate to async flask (unsuccessfully)
 Stan:
 Jan Bryczkowski: I contributed to the initial design paper, and implemented fault tolerance for database disconnection as well as the entire service disconnection. Also, added a solution for better database visibility, which was later replaced by a better solution.
-Filip:
+Filip: Initial setup. Enabling fault tolerance on the service level and load testing in terms of disconnecting services and databases.
 Christiaan: I setup the Kafka message queue, standardized the way we add stuff to the database and some small logic.
