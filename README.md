@@ -20,4 +20,8 @@ We use kafka to send and receive event messages between the microservices. This 
 
 ## Database fault tolerance
 
+Database fault tolerance is implemented by utilizing the wrapper function (with_redis_alive) which check whether the database connection is alive, and then executes a set of transactions. If the database connection is off, we retry.
+
 ## Service fault tolerance
+
+Service fault tolerance is implemented by utilizing the fact that order_id is unique for each change in payment and stock services. We create a separate table (in each service) containing order_id's that were properly processed. This value is updated at the end of stock or credit removal. Before these operations, we check whether the order_id exists in the table, and if so, we return a message that it has already been processed. Otherwise, we atomically execute all transactions including writing order_id to the table, which ensures that the value will be present in case of a service failure. If that happens, and we retry to process the message on the queue from the beginning, we already know in which state it is.
