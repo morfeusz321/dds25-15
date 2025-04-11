@@ -198,7 +198,6 @@ def process_stock_event(message):
     if message.key == "subtract_stock":
         try:
             for item_id, amount in order.items:
-                #TODO: make sure that if some get removed but not all then rollback locally
                 remove_stock_kafka(item_id, amount, order_id)
         except Exception as e:
             producer.send(ORDER_TOPIC, key="stock_subtraction_failed", value=(order_id, order))

@@ -32,25 +32,16 @@ REQ_ERROR_STR = "Requests error"
 GATEWAY_URL = os.environ['GATEWAY_URL']
 app = Flask("order-service")
 
-# temporary hashmap to keep track of order responses cannot be used if we want crash tolerance for order service, 
-# or if order is going to have multiple instances
-# indemopotency key 
-
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
                               password=os.environ['REDIS_PASSWORD'],
                               db=int(os.environ['REDIS_DB']))
 
-# Create a table in redis to keep track of the state of checkout orders
+# To track the state of the checkout process, we will use an obejct in the DB
+# We created a table in redis to keep track of the state of checkout orders
 # 3 columns order_id, stock_subtracted, payment_made
 # order_id is the key, stock_subtracted and payment_made are ints -1, 0, 1
 # -1 means no message was received, 0 means failure, 1 means success
-
-# add table to redis
-
-#TODO code here
-
-
 
 """
 Setup Kafka producer
