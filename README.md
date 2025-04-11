@@ -1,53 +1,23 @@
-# Web-scale Data Management Project Template
+# Distributed Data Systems project
 
-Basic project structure with Python's Flask and Redis. 
-**You are free to use any web framework in any language and any database you like for this project.**
+This document goes over our implemented features and design choices we made to make it easier for the grading team to evalute our system and understand the code.
 
-### Project structure
+## Event driven design
 
-* `env`
-    Folder containing the Redis env variables for the docker-compose deployment
-    
-* `helm-config` 
-   Helm chart values for Redis and ingress-nginx
-        
-* `k8s`
-    Folder containing the kubernetes deployments, apps and services for the ingress, order, payment and stock services.
-    
-* `order`
-    Folder containing the order application logic and dockerfile. 
-    
-* `payment`
-    Folder containing the payment application logic and dockerfile. 
+We designed the transactions to be event-driven as opposed to request-response architecture. This means that when a user starts a checkout it sends event messages to the other services but returns an immeadite 200 OK response that the order is processing. This doesn't necessarily mean the order is succesful only that it started the checkout process. When the order is successful the order status in the databse will be set to paid. The user can check this status to learn if the order checkout went through or not.
 
-* `stock`
-    Folder containing the stock application logic and dockerfile. 
+**Note:** this also means the default consistency check will not correctly show the numbers for the log inconsistencies as that is checking the exact responses, and in our case that doesn't indicate whether an order was successful or not.
 
-* `test`
-    Folder containing some basic correctness tests for the entire system. (Feel free to enhance them)
+## SAGA and eventual consistency
 
-### Deployment types:
+Our system uses the SAGA pattern, with the order service acting as the orchestrator. This makes our system eventually consistent. We employ rolling back of the stock and payment in case the event handling on the other service does not go through. This makes it so that there might be less stock or money at a given moment than there should be but given enough time the rollbacks will eventually catch up and the numbers in the databse will be consistent.
 
-#### docker-compose (local development)
+**Note:** The given consistency check also needs to be adjusted because of this since that checks inconsistencies in the database immediately after the last order checkout but in our case our system needs extra time to be consistent after the last order checkout because of the eventual consistency.
 
-After coding the REST endpoint logic run `docker-compose up --build` in the base folder to test if your logic is correct
-(you can use the provided tests in the `\test` folder and change them as you wish). 
+## Kafka message brokers
 
-***Requirements:*** You need to have docker and docker-compose installed on your machine. 
+We use kafka to send and receive event messages between the microservices. This makes it so that the events don't have to be processed in the exact order they were sent, but more importantly it enables a level of fault tolerance. If a service is down while another service sends some messages to it, kafka makes sure that these events still arrive at the faulty service once it comes back online.
 
-K8s is also possible, but we do not require it as part of your submission. 
+## Database fault tolerance
 
-#### minikube (local k8s cluster)
-
-This setup is for local k8s testing to see if your k8s config works before deploying to the cloud. 
-First deploy your database using helm by running the `deploy-charts-minicube.sh` file (in this example the DB is Redis 
-but you can find any database you want in https://artifacthub.io/ and adapt the script). Then adapt the k8s configuration files in the
-`\k8s` folder to mach your system and then run `kubectl apply -f .` in the k8s folder. 
-
-***Requirements:*** You need to have minikube (with ingress enabled) and helm installed on your machine.
-
-#### kubernetes cluster (managed k8s cluster in the cloud)
-
-Similarly to the `minikube` deployment but run the `deploy-charts-cluster.sh` in the helm step to also install an ingress to the cluster. 
-
-***Requirements:*** You need to have access to kubectl of a k8s cluster.
+## Service fault tolerance
