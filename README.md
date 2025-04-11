@@ -16,7 +16,7 @@ Our system uses the SAGA pattern, with the order service acting as the orchestra
 
 ## Kafka message brokers
 
-We use kafka to send and receive event messages between the microservices. This makes it so that the events don't have to be processed in the exact order they were sent, but more importantly it enables a level of fault tolerance. If a service is down while another service sends some messages to it, kafka makes sure that these events still arrive at the faulty service once it comes back online.
+We use kafka to send and receive event messages between the microservices. This makes it so that the events don't have to be processed in the exact order they were sent, but more importantly it enables a level of fault tolerance. If a service is down while another service sends some messages to it, kafka makes sure that these events still arrive at the faulty service once it comes back online. Kafka needs to be up for the communication to work between the microservices so killing that part of the system will break the consistency, we havent found a way to make the system tolerate a kafka fault.
 
 ## Database fault tolerance
 
