@@ -1,14 +1,25 @@
 import logging
 import os
 import atexit
-import pickle
 import uuid
+import pickle
 
 import redis
 from kafka import KafkaProducer, KafkaConsumer
+from time import sleep
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+
+def with_redis_alive(func):
+    def wrapper(*args, **kwargs):
+        while True:
+            try:
+                return func(*args, **kwargs)
+            except redis.exceptions.RedisError as e:
+                print(f"Redis unavailable, retrying... ({e})")
+                sleep(1)
+    return wrapper
 
 DB_ERROR_STR = "DB error"
 
@@ -51,6 +62,9 @@ atexit.register(close_db_connection)
 class UserValue(Struct):
     credit: int
 
+class UserValueOrderId(Struct):
+    order_id: str
+
 class OrderValue(Struct):
     paid: bool
     items: list[tuple[str, int]]
@@ -58,47 +72,53 @@ class OrderValue(Struct):
     total_cost: int
 
 
+@with_redis_alive
 def get_user_from_db(user_id: str) -> UserValue | None:
     try:
-        # get serialized data
-        entry: bytes = db.get(user_id)
+        # Retrieve all fields of the hash
+        entry = db.hgetall(f"user:{user_id}")
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    # deserialize data if it exists else return null
-    entry: UserValue | None = msgpack.decode(entry, type=UserValue) if entry else None
-    if entry is None:
-        # if user does not exist in the database; abort
+    
+    if not entry:
+        # If user does not exist in the database; abort
         abort(400, f"User: {user_id} not found!")
-    return entry
+    
+    # Deserialize the hash fields
+    return UserValue(
+        credit=int(entry[b'credit'])
+    )
 
-
+@with_redis_alive
 @app.post('/create_user')
 def create_user():
     key = str(uuid.uuid4())
-    value = msgpack.encode(UserValue(credit=0))
     try:
-        db.set(key, value)
         db.hset(f"user:{key}", mapping={
-            "credit": 0,
+            "credit": 0
         })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({'user_id': key})
 
 
+@with_redis_alive
 @app.post('/batch_init/<n>/<starting_money>')
 def batch_init_users(n: int, starting_money: int):
     n = int(n)
     starting_money = int(starting_money)
-    kv_pairs: dict[str, bytes] = {f"{i}": msgpack.encode(UserValue(credit=starting_money))
-                                  for i in range(n)}
+
     try:
-        db.mset(kv_pairs)
+        for i in range(n):
+            db.hset(f"user:{i}", mapping={
+                "credit": starting_money
+            })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({"msg": "Batch init for users successful"})
 
 
+@with_redis_alive
 @app.get('/find_user/<user_id>')
 def find_user(user_id: str):
     user_entry: UserValue = get_user_from_db(user_id)
@@ -110,34 +130,61 @@ def find_user(user_id: str):
     )
 
 
+@with_redis_alive
 @app.post('/add_funds/<user_id>/<amount>')
 def add_credit(user_id: str, amount: int):
     user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
     user_entry.credit += int(amount)
+
     try:
-        db.set(user_id, msgpack.encode(user_entry))
         db.hset(f"user:{user_id}", mapping={
-            "credit": user_entry.credit,
+            "credit": user_entry.credit
         })
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
 
+@with_redis_alive
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit(user_id: str, amount: int):
     app.logger.debug(f"Removing {amount} credit from user: {user_id}")
+
     user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
+    user_entry.credit -= int(amount)
+    if user_entry.credit < 0:
+        abort(400, f"User: {user_id} credit cannot get reduced below zero!")
+
+    try:
+        db.hset(f"user:{user_id}", mapping={
+            "credit": user_entry.credit
+        })
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+
+@with_redis_alive
+def remove_credit_kafka(user_id: str, amount: int, order_id: str):
+    app.logger.debug(f"Removing {amount} credit from user: {user_id}")
+
+    user_entry: UserValue = get_user_from_db(user_id)
     user_entry.credit -= int(amount)
     if user_entry.credit < 0:
         abort(400, f"User: {user_id} credit cannot get reduced below zero!")
     try:
-        db.set(user_id, msgpack.encode(user_entry))
-        db.hset(f"user:{user_id}", mapping={
-            "credit": user_entry.credit,
-        })
+        current_order_id = db.get(order_id)
+        if current_order_id is None:
+            with db.pipeline() as pipe:
+                pipe.watch(user_id, order_id)
+                pipe.multi()
+                pipe.set(user_id, msgpack.encode(user_entry))
+                pipe.hset(f"user:{user_id}", mapping={
+                    "credit": user_entry.credit,
+                })
+                pipe.set(order_id, msgpack.encode(UserValueOrderId(order_id=order_id)))
+                pipe.execute()
+        else:
+            return abort(400, f"Remove credit for order: {order_id} already done!")
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
@@ -151,7 +198,7 @@ def process_payment_event(message):
 
     if message.key == "make_payment":
         try:
-            remove_credit(order.user_id, order.total_cost)
+            remove_credit_kafka(order.user_id, order.total_cost, order_id)
         except Exception as e:
             print(f"Error removing credit: {e}")
             producer.send(ORDER_TOPIC, key="payment_failed", value=(order_id, order))
@@ -174,6 +221,7 @@ def start_payment_consumer():
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         group_id='payment-group',
         auto_offset_reset='earliest',
+        enable_auto_commit=False,
         key_deserializer=lambda k: pickle.loads(k),
         value_deserializer=lambda v: pickle.loads(v)
     )
@@ -181,6 +229,7 @@ def start_payment_consumer():
     for message in consumer:
         try:
             process_payment_event(message)
+            consumer.commit()
         except Exception as e:
             app.logger.error(f"Error processing payment event: {e.__cause__}")
 
