@@ -109,10 +109,10 @@ def batch_init_users(n: int, starting_money: int):
     starting_money = int(starting_money)
 
     try:
+        pipeline = db.pipeline()
         for i in range(n):
-            db.hset(f"user:{i}", mapping={
-                "credit": starting_money
-            })
+            pipeline.hset(i, mapping={"credit": starting_money})
+        pipeline.execute()
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({"msg": "Batch init for users successful"})
